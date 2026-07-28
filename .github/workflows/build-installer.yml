@@ -32,13 +32,13 @@ jobs:
       - name: Install Inno Setup
         shell: pwsh
         run: |
-          $innoUrl = "https://jrsoftware.org/download.php/is.exe"
-          $installer = "$env:TEMP\\is.exe"
+          $innoUrl = "https://github.com/jrsoftware/issrc/releases/download/is-6_7_3/innosetup-6.7.3.exe"
+          $installer = "$env:TEMP\innosetup.exe"
           $installDir = "${env:ProgramFiles(x86)}\Inno Setup 6"
-      
+
           Invoke-WebRequest -Uri $innoUrl -OutFile $installer -ErrorAction Stop
           Start-Process -FilePath $installer -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART',("/DIR=""$installDir""") -Wait
-      
+
           # Make ISCC available to all subsequent steps
           "$installDir" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
 
