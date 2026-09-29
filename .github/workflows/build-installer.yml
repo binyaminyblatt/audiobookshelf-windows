@@ -18,12 +18,12 @@ jobs:
 
     steps:
       # 0. Setup steps
-      - name: Use Node.js 20
+      - name: Use Node.js 24
         uses: actions/setup-node@v3
         with:
-          node-version: 20
+          node-version: 24
 
-      - name: Install pkg globally (using yao-pkg fork for targetting node20)
+      - name: Install pkg globally (using yao-pkg fork for targeting node24)
         run: npm install -g @yao-pkg/pkg
 
       - name: Setup .NET
