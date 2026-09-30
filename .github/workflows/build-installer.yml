@@ -1,35 +1,109 @@
 name: Build Windows installer on Release of audiobookshelf
 
 on:
-  repository_dispatch:
-    types: [build-windows]
+  schedule:
+    # Check for new upstream audiobookshelf releases every 4 hours
+    - cron: '0 */4 * * *'
   workflow_dispatch:
     inputs:
       tag:
-        description: 'Tag to build'
-        required: true
-      abs_ref:
-        description: 'Audiobookshelf ref to use'
+        description: 'Tag to build (leave blank to build latest upstream release)'
         required: false
+        default: ''
+      force:
+        description: 'Force build even if release already exists in this repository'
+        required: false
+        type: boolean
+        default: false
+      abs_ref:
+        description: 'Audiobookshelf git ref/branch to use (optional)'
+        required: false
+        default: ''
+  repository_dispatch:
+    types: [build-windows]
 
 jobs:
   build-windows:
     runs-on: windows-latest
+    permissions:
+      contents: write
 
     steps:
-      # 0. Setup steps
+      # 1. Check upstream advplyr/audiobookshelf for new releases vs current repository
+      - name: Check for New Upstream Audiobookshelf Release
+        id: check_release
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const manualTag = context.payload.inputs?.tag?.trim();
+            const forceBuild = context.payload.inputs?.force || false;
+
+            // 1. Fetch latest release from upstream advplyr/audiobookshelf
+            let targetTag = manualTag;
+            let targetRelease = null;
+
+            if (!targetTag) {
+              const upstreamRelease = await github.rest.repos.getLatestRelease({
+                owner: 'advplyr',
+                repo: 'audiobookshelf'
+              });
+              targetTag = upstreamRelease.data.tag_name;
+              targetRelease = upstreamRelease.data;
+              console.log(`Latest upstream release on advplyr/audiobookshelf is: ${targetTag}`);
+            } else {
+              console.log(`Manual target tag specified: ${targetTag}`);
+            }
+
+            // 2. Check if this release tag already exists on current repository
+            let releaseExists = false;
+            try {
+              const myRelease = await github.rest.repos.getReleaseByTag({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                tag: targetTag
+              });
+              if (myRelease && myRelease.data) {
+                releaseExists = true;
+                console.log(`Release ${targetTag} already exists on ${context.repo.owner}/${context.repo.repo}.`);
+              }
+            } catch (err) {
+              if (err.status === 404) {
+                console.log(`Release ${targetTag} does NOT exist yet on ${context.repo.owner}/${context.repo.repo}. Proceeding with build!`);
+              } else {
+                console.log(`Note when checking release: ${err.message}`);
+              }
+            }
+
+            if (releaseExists && !forceBuild) {
+              console.log(`Release ${targetTag} already exists and force is false. Skipping build.`);
+              core.setOutput('should_build', 'false');
+            } else {
+              core.setOutput('should_build', 'true');
+            }
+
+            core.setOutput('tag', targetTag);
+            core.setOutput('name', targetRelease?.name || targetTag);
+            core.setOutput('body', targetRelease?.body || `Audiobookshelf server release ${targetTag}`);
+
+      # 2. Setup dependencies (Node.js, pkg, .NET, Inno Setup)
       - name: Use Node.js 24
-        uses: actions/setup-node@v3
+        if: steps.check_release.outputs.should_build == 'true'
+        uses: actions/setup-node@v4
         with:
           node-version: 24
 
-      - name: Install pkg globally (using yao-pkg fork for targeting node24)
+      - name: Install pkg globally (using yao-pkg fork for node24 support)
+        if: steps.check_release.outputs.should_build == 'true'
         run: npm install -g @yao-pkg/pkg
 
       - name: Setup .NET
-        uses: actions/setup-dotnet@v1
+        if: steps.check_release.outputs.should_build == 'true'
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
 
       - name: Install Inno Setup
+        if: steps.check_release.outputs.should_build == 'true'
         shell: pwsh
         run: |
           $innoUrl = "https://github.com/jrsoftware/issrc/releases/download/is-6_7_3/innosetup-6.7.3.exe"
@@ -39,73 +113,242 @@ jobs:
           Invoke-WebRequest -Uri $innoUrl -OutFile $installer -ErrorAction Stop
           Start-Process -FilePath $installer -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART',("/DIR=""$installDir""") -Wait
 
-          # Make ISCC available to all subsequent steps
+          # Make ISCC available in path
           "$installDir" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
 
-      # 1. Build the audiobookshelf executable
-      - name: Get Latest Audiobookshelf Release Tag
-        id: get_latest_release
-        uses: actions/github-script@v7
-        with:
-          script: |
-            const { data } = await github.rest.repos.getLatestRelease({
-              owner: 'advplyr',
-              repo: 'audiobookshelf',
-            })
-            console.log('Audiobookshelf latest release tag: ' + data.tag_name)
-            return data.tag_name
-          result-encoding: string
-      - uses: actions/checkout@v3
+      # 3. Checkout and build audiobookshelf server executable
+      - name: Checkout audiobookshelf
+        if: steps.check_release.outputs.should_build == 'true'
+        uses: actions/checkout@v4
         with:
           repository: advplyr/audiobookshelf
-          ref: ${{ github.event_name == 'repository_dispatch' && steps.get_latest_release.outputs.result || inputs.abs_ref }}
+          ref: ${{ github.event.inputs.abs_ref || steps.check_release.outputs.tag }}
           path: ./audiobookshelf
 
-      - name: Install dependencies
+      - name: Install server dependencies
+        if: steps.check_release.outputs.should_build == 'true'
         run: npm ci
         working-directory: ./audiobookshelf
 
-      - name: Build windows executable
+      - name: Build server windows executable
+        if: steps.check_release.outputs.should_build == 'true'
         run: npm run build-win-no-compress
         working-directory: ./audiobookshelf
 
-      # 2. Build the tray app
-      - uses: actions/checkout@v3
+      # 4. Checkout Audiobookshelf Windows Solution
+      - name: Checkout audiobookshelf-windows
+        if: steps.check_release.outputs.should_build == 'true'
+        uses: actions/checkout@v4
         with:
           path: ./audiobookshelf-windows
 
+      # 5. Inject Public Key from Secrets & Detect Key Rotation
+      - name: Prepare Signing Keys and Detect Key Rotation
+        if: steps.check_release.outputs.should_build == 'true'
+        shell: pwsh
+        env:
+          SIGNING_PRIVATE_KEY: ${{ secrets.RELEASE_SIGNING_PRIVATE_KEY }}
+          SIGNING_PUBLIC_KEY: ${{ secrets.RELEASE_SIGNING_PUBLIC_KEY }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          TARGET_TAG: ${{ steps.check_release.outputs.tag }}
+        run: |
+          # 1. Determine Public Key & Private Key
+          $privateKey = $env:SIGNING_PRIVATE_KEY
+          $publicKey = $env:SIGNING_PUBLIC_KEY
+
+          if (-not [string]::IsNullOrWhiteSpace($publicKey)) {
+            $publicKey = $publicKey.Trim()
+          } elseif (-not [string]::IsNullOrWhiteSpace($privateKey)) {
+            Write-Host "Deriving RSA public key from private key secret..."
+            $rsa = New-Object System.Security.Cryptography.RSACryptoServiceProvider 2048
+            $rsa.FromXmlString($privateKey.Trim())
+            $publicKey = $rsa.ToXmlString($false)
+          } else {
+            Write-Error "CRITICAL: Neither RELEASE_SIGNING_PUBLIC_KEY nor RELEASE_SIGNING_PRIVATE_KEY secret is configured! Please add these in Repository Secrets."
+            exit 1
+          }
+
+          if (-not $publicKey.Contains("<RSAKeyValue>") -or -not $publicKey.Contains("</RSAKeyValue>")) {
+            Write-Error "Invalid RSA public key XML format."
+            exit 1
+          }
+
+          # Write out public key artifacts for release packaging
+          [System.IO.File]::WriteAllText("./public_key.xml", $publicKey, [System.Text.Encoding]::UTF8)
+          $pubKeyHash = (Get-FileHash -Path "./public_key.xml" -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$pubKeyHash *public_key.xml" | Out-File -FilePath "./public_key.sha256" -Encoding ascii
+
+          # 2. Inject Public Key into CryptographicVerifier.cs before build
+          $verifierFile = "./audiobookshelf-windows/Audiobookshelf.Common/CryptographicVerifier.cs"
+          $code = [System.IO.File]::ReadAllText($verifierFile, [System.Text.Encoding]::UTF8)
+          $placeholder = '__INJECTED_PUBLIC_KEY_XML__'
+
+          if (-not $code.Contains($placeholder)) {
+            Write-Error "Placeholder '$placeholder' not found in $verifierFile"
+            exit 1
+          }
+
+          $updatedCode = $code.Replace($placeholder, $publicKey)
+          [System.IO.File]::WriteAllText($verifierFile, $updatedCode, [System.Text.Encoding]::UTF8)
+          Write-Host "Successfully injected RSA public key into $verifierFile for compilation."
+
+          # 3. Detect if Signing Key Changed Compared to Previous Release
+          $headers = @{
+            "Authorization" = "Bearer $env:GITHUB_TOKEN"
+            "Accept" = "application/vnd.github.v3+json"
+            "User-Agent" = "Audiobookshelf-CI"
+          }
+          $releasesApiUrl = "https://api.github.com/repos/$env:GITHUB_REPOSITORY/releases"
+          $keyChanged = $false
+          $previousTag = ""
+
+          try {
+            $releases = Invoke-RestMethod -Uri $releasesApiUrl -Headers $headers -Method Get
+            $prevRelease = $releases | Where-Object { $_.tag_name -ne $env:TARGET_TAG -and $_.draft -eq $false } | Select-Object -First 1
+
+            if ($prevRelease) {
+              $previousTag = $prevRelease.tag_name
+              Write-Host "Comparing key against previous release '$previousTag'..."
+
+              $pubAsset = $prevRelease.assets | Where-Object { $_.name -eq "public_key.xml" } | Select-Object -First 1
+              if ($pubAsset) {
+                $prevKeyXml = (Invoke-RestMethod -Uri $pubAsset.browser_download_url -Headers $headers).Trim()
+                if ($prevKeyXml -ne $publicKey.Trim()) {
+                  Write-Warning "Signing key change detected: previous public_key.xml does not match current public key."
+                  $keyChanged = $true
+                } else {
+                  Write-Host "Signing key verified identical to previous release '$previousTag'."
+                }
+              } else {
+                # Fallback: check if previous SHA256SUMS.sig verifies with our new public key
+                $prevSigAsset = $prevRelease.assets | Where-Object { $_.name -eq "SHA256SUMS.sig" } | Select-Object -First 1
+                $prevSumsAsset = $prevRelease.assets | Where-Object { $_.name -eq "SHA256SUMS" } | Select-Object -First 1
+                if ($prevSigAsset -and $prevSumsAsset) {
+                  $prevSumsBytes = (Invoke-WebRequest -Uri $prevSumsAsset.browser_download_url).Content
+                  $prevSigBytes = (Invoke-WebRequest -Uri $prevSigAsset.browser_download_url).Content
+                  $rsaCheck = New-Object System.Security.Cryptography.RSACryptoServiceProvider 2048
+                  $rsaCheck.FromXmlString($publicKey)
+                  $sha256 = [System.Security.Cryptography.SHA256]::Create()
+                  $prevHashBytes = $sha256.ComputeHash($prevSumsBytes)
+                  $valid = $rsaCheck.VerifyHash($prevHashBytes, [System.Security.Cryptography.CryptoConfig]::MapNameToOID("SHA256"), $prevSigBytes)
+                  if (-not $valid) {
+                    Write-Warning "Previous release signature failed verification with current key. Key change detected!"
+                    $keyChanged = $true
+                  } else {
+                    Write-Host "Previous release signature verified with current key."
+                  }
+                }
+              }
+            } else {
+              Write-Host "No previous release found in repository. Treating as initial release."
+            }
+          } catch {
+            Write-Warning "Could not retrieve previous releases for key rotation check: $_"
+          }
+
+          # 4. Generate Release Notes (Markdown body)
+          $notes = New-Object System.Text.StringBuilder
+          if ($keyChanged) {
+            $null = $notes.AppendLine("> [!CAUTION]")
+            $null = $notes.AppendLine("> ## ⚠️ CRITICAL NOTICE: Signing Key Changed / Rotated")
+            $null = $notes.AppendLine("> **The cryptographic signing key has changed with this release.**")
+            $null = $notes.AppendLine("> **Automatic background updates will not work from previous versions because existing installations cannot verify this release's signature with their older embedded public key.**")
+            $null = $notes.AppendLine("> **You MUST manually download and reinstall AudiobookshelfInstaller.exe.**")
+            $null = $notes.AppendLine("")
+            $null = $notes.AppendLine("---")
+            $null = $notes.AppendLine("")
+          }
+
+          $null = $notes.AppendLine("### Audiobookshelf Windows Release $env:TARGET_TAG")
+          $null = $notes.AppendLine("- Audiobookshelf upstream release: [$env:TARGET_TAG](https://github.com/advplyr/audiobookshelf/releases/tag/$env:TARGET_TAG)")
+          $null = $notes.AppendLine("- Includes background Windows Service, Network Drive Mapping supervisor, System Tray app, standalone server binary, and cryptographic signature manifests.")
+          $null = $notes.AppendLine("")
+          $null = $notes.AppendLine("### Cryptographic Integrity & Supply Chain Verification")
+          $null = $notes.AppendLine("All binaries are signed using RSA-SHA256. Verification files included: `SHA256SUMS`, `SHA256SUMS.sig`, `audiobookshelf.exe.sig`, and `public_key.xml`.")
+
+          [System.IO.File]::WriteAllText("./release_notes.md", $notes.ToString(), [System.Text.Encoding]::UTF8)
+          Write-Host "Release notes written to ./release_notes.md (Key changed: $keyChanged)"
+
+      # 6. Build Audiobookshelf Windows Solution (Service, Common, Tray)
       - name: Build solution
-        run: dotnet build -c Release
+        if: steps.check_release.outputs.should_build == 'true'
+        run: dotnet build AudiobookshelfTray.sln -c Release
         working-directory: ./audiobookshelf-windows
 
-      # 3. Build the installer
-      - name: Compile inno setup
-        run: iscc /DMyAppVersion=${{ github.event_name == 'repository_dispatch' && steps.get_latest_release.outputs.result || inputs.tag }} Setup/installer.iss
+      # 7. Build Inno Setup Installer
+      - name: Compile Inno Setup Installer
+        if: steps.check_release.outputs.should_build == 'true'
+        run: iscc /DMyAppVersion=${{ steps.check_release.outputs.tag }} Setup/Installer.iss
         working-directory: ./audiobookshelf-windows
 
-      # 4. Create a release
-      - name: Create Release
-        id: create_release
-        uses: actions/create-release@v1
+      # 8. Generate Checksums and Sign Release Assets
+      - name: Generate Checksums and Sign Release Assets
+        if: steps.check_release.outputs.should_build == 'true'
+        shell: pwsh
+        env:
+          SIGNING_KEY: ${{ secrets.RELEASE_SIGNING_PRIVATE_KEY }}
+        run: |
+          $serverExe = "./audiobookshelf/dist/win/audiobookshelf.exe"
+          $installerExe = "./audiobookshelf-windows/Setup/Output/AudiobookshelfInstaller.exe"
+
+          # 1. Compute SHA-256 Hashes
+          $serverHash = (Get-FileHash -Path $serverExe -Algorithm SHA256).Hash.ToLowerInvariant()
+          $installerHash = (Get-FileHash -Path $installerExe -Algorithm SHA256).Hash.ToLowerInvariant()
+
+          "$serverHash *audiobookshelf.exe" | Out-File -FilePath "./audiobookshelf.exe.sha256" -Encoding ascii -NoNewline
+          "$installerHash *AudiobookshelfInstaller.exe" | Out-File -FilePath "./AudiobookshelfInstaller.exe.sha256" -Encoding ascii -NoNewline
+
+          $sumsContent = "$serverHash  audiobookshelf.exe`n$installerHash  AudiobookshelfInstaller.exe`n"
+          [System.IO.File]::WriteAllText("./SHA256SUMS", $sumsContent)
+
+          Write-Host "Generated SHA256 hashes:"
+          Write-Host "audiobookshelf.exe: $serverHash"
+          Write-Host "AudiobookshelfInstaller.exe: $installerHash"
+
+          # 2. Cryptographic Digital Signature (Strictly from GitHub Repository Secret)
+          if (-not $env:SIGNING_KEY) {
+            Write-Error "RELEASE_SIGNING_PRIVATE_KEY secret is not configured in GitHub repository secrets! Release cannot be signed."
+            exit 1
+          }
+
+          $rsa = New-Object System.Security.Cryptography.RSACryptoServiceProvider 2048
+          $rsa.FromXmlString($env:SIGNING_KEY.Trim())
+
+          # Sign server hash
+          $serverBytes = [System.IO.File]::ReadAllBytes($serverExe)
+          $sha256 = [System.Security.Cryptography.SHA256]::Create()
+          $serverHashBytes = $sha256.ComputeHash($serverBytes)
+          $serverSig = $rsa.SignHash($serverHashBytes, [System.Security.Cryptography.CryptoConfig]::MapNameToOID("SHA256"))
+          [System.IO.File]::WriteAllBytes("./audiobookshelf.exe.sig", $serverSig)
+
+          # Sign SHA256SUMS manifest
+          $sumsBytes = [System.IO.File]::ReadAllBytes("./SHA256SUMS")
+          $sumsHashBytes = $sha256.ComputeHash($sumsBytes)
+          $sumsSig = $rsa.SignHash($sumsHashBytes, [System.Security.Cryptography.CryptoConfig]::MapNameToOID("SHA256"))
+          [System.IO.File]::WriteAllBytes("./SHA256SUMS.sig", $sumsSig)
+
+          Write-Host "Cryptographic signatures generated successfully using repository secret key."
+
+      # 9. Create release & upload installer and server assets
+      - name: Create Release and Upload Assets
+        if: steps.check_release.outputs.should_build == 'true'
+        uses: softprops/action-gh-release@v2
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          tag_name: ${{ github.event_name == 'repository_dispatch' && steps.get_latest_release.outputs.result || inputs.tag }}
-          release_name: ${{ github.event_name == 'repository_dispatch' && steps.get_latest_release.outputs.result || inputs.tag }}
-          body: |
-            - Server release [${{ github.event_name == 'repository_dispatch' && steps.get_latest_release.outputs.result || inputs.tag }}](https://github.com/advplyr/audiobookshelf/releases/tag/${{ github.event_name == 'repository_dispatch' && steps.get_latest_release.outputs.result || inputs.tag }})
-
-            No changes on the Windows side.
-          draft: ${{ github.event_name == 'workflow_dispatch' }}
+          tag_name: ${{ steps.check_release.outputs.tag }}
+          name: ${{ steps.check_release.outputs.tag }}
+          body_path: ./release_notes.md
+          draft: false
           prerelease: false
-      
-      - name: Upload Release Asset
-        id: upload-release-asset
-        uses: actions/upload-release-asset@v1
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          upload_url: ${{ steps.create_release.outputs.upload_url }}
-          asset_path: ./audiobookshelf-windows/Setup/Output/AudiobookshelfInstaller.exe
-          asset_name: AudiobookshelfInstaller.${{ github.event_name == 'repository_dispatch' && steps.get_latest_release.outputs.result || inputs.tag }}.exe
-          asset_content_type: application/x-msdownload
+          files: |
+            ./audiobookshelf-windows/Setup/Output/AudiobookshelfInstaller.exe
+            ./audiobookshelf/dist/win/audiobookshelf.exe
+            ./audiobookshelf.exe.sha256
+            ./audiobookshelf.exe.sig
+            ./AudiobookshelfInstaller.exe.sha256
+            ./SHA256SUMS
+            ./SHA256SUMS.sig
+            ./public_key.xml
+            ./public_key.sha256

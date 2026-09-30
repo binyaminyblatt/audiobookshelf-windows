@@ -1,11 +1,11 @@
-﻿using System;
+using System;
 using System.Diagnostics;
 using System.Runtime.InteropServices;
 using NLog;
 
-namespace AudiobookshelfTray
+namespace Audiobookshelf.Common
 {
-    internal class ProcessUtils
+    public static class ProcessUtils
     {
         [DllImport("kernel32.dll", SetLastError = true)]
         private static extern bool AttachConsole(uint dwProcessId);

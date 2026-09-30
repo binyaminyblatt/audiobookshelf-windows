@@ -1,0 +1,22 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net461</TargetFramework>
+    <LangVersion>latest</LangVersion>
+    <Nullable>disable</Nullable>
+    <Platforms>x64</Platforms>
+    <RootNamespace>Audiobookshelf.Common</RootNamespace>
+    <AssemblyName>Audiobookshelf.Common</AssemblyName>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Newtonsoft.Json" Version="13.0.3" />
+    <PackageReference Include="NLog" Version="5.2.8" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Reference Include="System.ServiceProcess" />
+    <Reference Include="System.Net.Http" />
+  </ItemGroup>
+
+</Project>

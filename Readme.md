@@ -1,103 +1,58 @@
 # audiobookshelf-windows
 
-Installs and manages the [audiobookshelf](https://github.com/advplyr/audiobookshelf) server on Windows.
+Installs and manages the [audiobookshelf](https://github.com/advplyr/audiobookshelf) server on Windows as a native **Windows Background Service** with **Network Drive Mapping** and a companion System Tray manager.
 
-It installs the latest released version of the server itself (pre-packaged as a Windows executable), and a tray app for managing it.
-The tray app runs in the background, and can be accessed by clicking the Audiobookshelf tray icon
-(<img src="Resources/AppIcon.ico" width="16" height="16"/>) in the system tray (bottom right corner of the screen).
+## Key Features
 
-The tray app lets you:
-
-- Open the server in your default browser
-- Start/Stop the server
-- Set the server to start on login
-- View the server logs
-- Change the server port and data folder
-- Check for updates, download and install them
-
-Audiobookshelf-windows releases are automatically kept up to date with the latest audiobookshelf server releases.
+- **Runs as a 24/7 Windows Background Service**: Starts automatically on system boot (before user login).
+- **Network Drive Mapping**: Automatically mounts UNC shares (e.g. `\\NAS\audiobooks` to `Z:`) before server startup with configurable retry attempts and delays.
+- **Watchdog & Auto-Restart**: Automatically recovers and restarts the server process if it exits unexpectedly.
+- **Interactive System Tray**:
+  - Start, stop, and restart the Windows Service.
+  - Open the Audiobookshelf web interface in your default browser.
+  - View live streaming server logs (tailing `C:\ProgramData\Audiobookshelf\logs\server.log`).
+  - Configure server port, data directory, and network drive mappings.
+  - Automatic update checks and installation from GitHub releases.
 
 ## System Requirements
 
-- Windows 10 64-bit or later
-
-You **do not** need to install .NET Framework, as it is included in any Windows 10/11 installation.
-
-You **do not** need to install Node.js, as the server executable is pre-packaged with it.
+- Windows 10/11 64-bit or Windows Server 2016+
+- .NET Framework 4.6.1 (pre-installed on modern Windows)
+- Administrator privileges (for installing the Windows Service)
 
 ## Installation
 
-Download the latest installer release from the [release page](https://github.com/mikiher/audiobookshelf-windows/releases/latest) and run it.
+Download the latest installer from the [Releases](https://github.com/binyaminyblatt/audiobookshelf-windows/releases/latest) page and run `AudiobookshelfInstaller.exe`.
 
-## Caveats
+The installer will:
+1. Install `audiobookshelf.exe`, `AudiobookshelfService.exe`, and `AudiobookshelfTray.exe`.
+2. Register and start the `AudiobookshelfService` Windows Service.
+3. Launch the Tray application.
 
-- It's not currently possible to migrate the server data from a previous Windows Docker installation to this one (see [this issue](https://github.com/mikiher/audiobookshelf-windows/issues/3))
+## Configuration
 
-## Development
+Configuration is saved in `C:\ProgramData\Audiobookshelf\config.json`. You can manage settings via the Tray App:
+- Right-click the Audiobookshelf tray icon -> **Settings**.
+- **Server Settings**: Change HTTP Port (default: `13378`) and Data Directory.
+- **Network Drives**: Add, edit, or remove mapped drive letters (`Z:`, `Y:`, etc.) pointing to UNC network shares (`\\192.168.1.50\audiobooks`), with optional user credentials and auto-remount retry options.
 
-All development was done on a Windows 10 64-bit desktop.
+## Architecture
 
-The tray app was developed in C# using .NET Framework 4.6.1 and Winforms.
-It was based on the [audiobookshelf-win](https://github.com/advplyr/audiobookshelf-win) codebase by [advplyr](https://github.com/advplyr).
+- **`Audiobookshelf.Common`**: Shared library containing `DriveMap` (Win32 `mpr.dll` `WNetAddConnection2`), `CryptographicVerifier` (RSA-SHA256 provenance and checksum verification), `UpdateManager` (self-updater & automated rollback), `SettingsHandler` (JSON config), and `ServiceControllerHelper`.
+- **`AudiobookshelfService.exe`**: The Windows Service that mounts network drives, supervises `audiobookshelf.exe` in Session 0, and handles scheduled midnight updates.
+- **`AudiobookshelfTray.exe`**: WinForms system tray application running in the user session.
 
-The installer was developed using [Inno Setup](https://jrsoftware.org/isinfo.php).
+## Release Signing & Supply Chain Security
 
-### 1. Building the Audiobookshelf server executable
+The GitHub Actions CI/CD pipeline cryptographically signs release assets using RSA-SHA256:
+- **Private Key**: Kept exclusively in GitHub Actions encrypted secrets (`RELEASE_SIGNING_PRIVATE_KEY`).
+- **Public Key**: Optionally provided in `RELEASE_SIGNING_PUBLIC_KEY` secret (or auto-derived from the private key secret) and dynamically injected into the binaries at build time before compilation.
+- **Key Rotation Detection**: If the signing key is ever rotated or changed, the build workflow automatically detects the change compared to prior releases and publishes a release warning notifying users that automatic updates cannot verify the new key and manual reinstallation is required.
+- **Self-Updater Verification**: The client verifies digital signatures and SHA-256 hashes before staging and applying any updates.
 
-- Install [Node.js 24](https://nodejs.org/en/download/) (Must be version 24)
-  - Optional: install [nvm-windows](https://github.com/coreybutler/nvm-windows#installation--upgrades) to manage multiple Node.js versions
-- Install Visual Studio Code
-- Clone the [audiobookshelf](https://github.com/advplyr/audiobookshelf.git) Github repository
-- Open the `audiobookshelf` folder in Visual Studio Code
-- Open the terminal (Ctrl+Shift+`)
-- Run `npm ci` to install the dependencies
-- Run `npm i @yao-pkg/pkg -g` to install the yao-pkg (Node.js to executable) package. Yao-pkg is a fork of the original pkg package, which is no longer maintained.
-- Run `npm run build-win-no-compress` to build the audiobookshelf server executable (it will be placed in the `dist\win` folder)
+### Setting up Release Signing in GitHub:
+1. Generate an RSA 2048-bit keypair (e.g. via PowerShell `(New-Object System.Security.Cryptography.RSACryptoServiceProvider 2048).ToXmlString($true)`).
+2. Store the **Private Key** in your repository: **Settings -> Secrets and variables -> Actions -> Repository secrets -> `RELEASE_SIGNING_PRIVATE_KEY`**.
+3. (Optional) Store the matching **Public Key** in **`RELEASE_SIGNING_PUBLIC_KEY`** (if omitted, the build script will automatically derive the public key from the private key secret).
+4. No code edits are required to rotate keys—simply update the repository secrets and trigger a build.
 
-### 2. Building the Audiobookshelf tray app
-
-The tray app can be built using either Visual Studio 2022 or Visual Studio Code.
-
-- If you need to make design changes to the UI, it's recommended to use Visual Studio 2022, as it has a visual designer for Winforms.
-- It's convenient to use Visual Studio 2022 since it has a built-in debug console, in which you can see Debeug.WriteLine() messages.
-- If you only need to make code changes, you can use Visual Studio Code.
-
-#### On Visual Studio 2022
-
-- Install [Visual Studio 2022 Community Edition](https://visualstudio.microsoft.com/downloads/)
-- Install the [.NET Desktop Development workload](https://learn.microsoft.com/en-us/visualstudio/install/install-visual-studio?view=vs-2022#step-4---choose-workloads)
-- Clone [this repository](https://github.com/mikiher/audiobookshelf-windows.git)
-- Open the `Audiobookshelf.sln` solution file in Visual Studio
-- Build the solution (F6) (you will find the executable in the `bin\x64\Release\net461` or `bin\x64\Debug\net461` folder, depending on the build configuration)
-
-#### On Visual Studio Code
-
-- Install [Visual Studio Code](https://code.visualstudio.com/download)
-- Install the [C# Dev Kit](https://marketplace.visualstudio.com/items?itemName=ms-dotnettools.csdevkit)
-- Install the latest [.NET SDK](https://dotnet.microsoft.com/en-us/download)
-- Clone [this repository](https://github.com/mikiher/audiobookshelf-windows.git)
-- Open the terminal (Ctrl+Shift+`)
-- Run `dotnet build -c Release` or `dotnet build` to build the solution (you will find the executable in the `bin\x64\Release\net461` or `bin\x64\Debug\net461` folder, depending on the build configuration)
-
-#### Running the tray app
-
-You can run or debug the tray app directly from Visual Studio 2022 or Visual Studio Code.
-
-- Copy the audiobookshelf server executable to the `bin\x64\Release\net461` or `bin\x64\Debug\net461` folder, depending on the build configuration
-- The app tries to read the `AppVersion` and `DataDir` values from the registry key `HKEY_CURRENT_USER\SOFTWARE\Audiobookshelf`, and if they are not found, it will use the default values
-- Run or debug the app (F5). By default, the app will:
-  - try to get the server data folder from the registry key `HKEY_CURRENT_USER\SOFTWARE\Audiobookshelf\DataDir`
-    - if not found, the default value `%LocalAppData%\Audiobookshelf` will be used
-  - try to get the app version from the registry key `HKEY_CURRENT_USER\SOFTWARE\Audiobookshelf\AppVersion`
-  - run the server on port 13378 by default
-
-### 3. Building the installer
-
-- Install [Visual Studio Code](https://code.visualstudio.com/download)
-- Install [Inno Setup](https://jrsoftware.org/isinfo.php)
-- Install the [Inno Setup extension](https://marketplace.visualstudio.com/items?itemName=Chouzz.vscode-innosetup) for Visual Studio Code
-- Clone [this repository](https://github.com/mikiher/audiobookshelf-windows.git)
-- Open `Setup\installer.iss` in Visual Studio Code
-- Change `#define MyAppBinDir` to the folder where the Audiobookshelf tray app executable and dlls are located
-- Change `#define ServerBinDir` to the folder where the Audiobookshelf server executable is located
-- Run the `Build Installer` task (Ctrl+Shift+B) to build the installer (you will find it in the `Setup\Output` folder)

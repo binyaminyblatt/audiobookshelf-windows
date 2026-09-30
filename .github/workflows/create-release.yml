@@ -1,4 +1,4 @@
-name: Crete test release
+name: Create test release
 
 on:
   workflow_dispatch:
@@ -7,18 +7,15 @@ jobs:
   create-test-release:
     runs-on: ubuntu-latest
     steps:
-      - name: checkout
+      - name: Checkout
         uses: actions/checkout@v4
-        with:
-          ref: master
 
-      - name: create release
-        uses: actions/create-release@v1
-        id: create_release
+      - name: Create Test Release
+        uses: softprops/action-gh-release@v2
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           tag_name: test_tag
-          release_name: test_release
+          name: test_release
           draft: true
           prerelease: true

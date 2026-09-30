@@ -4,20 +4,20 @@
 #define MyAppVersion "v2.7.2.1"
 #endif
 
-
-#define MyAppBinDir "..\bin\x64\Release\net461"
+#define MyAppBinDir "..\AudiobookshelfTray\bin\x64\Release\net461"
+#define ServiceBinDir "..\AudiobookshelfService\bin\x64\Release\net461"
 #define ServerBinDir "..\..\audiobookshelf\dist\win"
+
 
 #define MyAppName "Audiobookshelf"
 #define MyAppPublisher "Audiobookshelf"
 #define MyAppURL "https://www.audiobookshelf.org/"
 #define MyAppExeName "AudiobookshelfTray.exe"
+#define ServiceExeName "AudiobookshelfService.exe"
 #define ServerExeName "audiobookshelf.exe"
-
+#define ServiceName "AudiobookshelfService"
 
 [Setup]
-; NOTE: The value of AppId uniquely identifies this application. Do not use the same AppId value in installers for other applications.
-; (To generate a new GUID, click Tools | Generate GUID inside the IDE.)
 AppId={{398D8732-4648-4C71-A30C-C0688D46BB13}
 AppName={#MyAppName}
 AppVersion={#MyAppVersion}
@@ -28,10 +28,9 @@ AppSupportURL={#MyAppURL}
 AppUpdatesURL={#MyAppURL}
 DefaultDirName={autopf}\{#MyAppName}
 DisableProgramGroupPage=yes
-; Uncomment the following line to run in non administrative install mode (install for current user only.)
-PrivilegesRequired=lowest
+PrivilegesRequired=admin
 OutputBaseFilename=AudiobookshelfInstaller
-SetupIconFile=..\Resources\AppIcon.ico
+SetupIconFile=..\AudiobookshelfTray\Resources\AppIcon.ico
 Compression=lzma
 SolidCompression=yes
 WizardStyle=modern
@@ -48,97 +47,309 @@ Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{
 [Files]
 Source: "{#MyAppBinDir}\{#MyAppExeName}"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#MyAppBinDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "{#ServiceBinDir}\{#ServiceExeName}"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#ServerBinDir}\{#ServerExeName}"; DestDir: "{app}"; Flags: ignoreversion
-; NOTE: Don't use "Flags: ignoreversion" on any shared system files
 
 [Icons]
 Name: "{autoprograms}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"
 Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: desktopicon
 
 [Run]
+; 1. Create the Windows Service (if not bypassed)
+Filename: "{sys}\sc.exe"; Parameters: "create {#ServiceName} binPath= ""{app}\{#ServiceExeName}"" start= auto DisplayName= ""Audiobookshelf Service"""; Flags: runhidden; Check: ShouldInstallService
+; 2. Set service description
+Filename: "{sys}\sc.exe"; Parameters: "description {#ServiceName} ""Audiobookshelf Background Server and Network Drive Supervisor"""; Flags: runhidden; Check: ShouldInstallService
+; 3. Configure service user account if provided
+Filename: "{sys}\sc.exe"; Parameters: "config {#ServiceName} obj= ""{code:GetServiceUsername}"" password= ""{code:GetServicePassword}"""; Flags: runhidden; Check: HasUserCredentials
+; 4. Start the service
+Filename: "{sys}\net.exe"; Parameters: "start {#ServiceName}"; Flags: runhidden; Check: ShouldInstallService
+; 5. Launch Tray application
 Filename: "{app}\{#MyAppExeName}"; Description: "{cm:LaunchProgram,{#StringChange(MyAppName, '&', '&&')}}"; Flags: nowait postinstall
 
+[UninstallRun]
+Filename: "{sys}\sc.exe"; Parameters: "stop {#ServiceName}"; Flags: runhidden; RunOnceId: "StopService"
+Filename: "{sys}\taskkill.exe"; Parameters: "/F /IM {#ServiceExeName} /IM {#ServerExeName} /IM {#MyAppExeName}"; Flags: runhidden; RunOnceId: "KillProcesses"
+Filename: "{sys}\sc.exe"; Parameters: "delete {#ServiceName}"; Flags: runhidden; RunOnceId: "DeleteService"
+
+[UninstallDelete]
+Type: files; Name: "{app}\*.bak"
+Type: files; Name: "{app}\*.log"
+
 [Registry]
-; Don't delete datadir in HKCU during uninstall - we want to keep the data dir if the user reinstalls
-Root: HKCU; Subkey: "Software\{#MyAppName}"; ValueType: string; ValueName: "DataDir"; ValueData: "{code:GetDataDir}"; 
-Root: HKCU; Subkey: "Software\{#MyAppName}"; ValueType: string; ValueName: "InstallDir"; ValueData: "{app}"; Flags: uninsdeletevalue
-Root: HKCU; Subkey: "Software\{#MyAppName}"; ValueType: string; ValueName: "AppVersion"; ValueData: "{#MyAppVersion}"; Flags: uninsdeletevalue
+Root: HKLM; Subkey: "Software\{#MyAppName}"; ValueType: string; ValueName: "DataDir"; ValueData: "{code:GetDataDir}"; Flags: uninsdeletevalue
+Root: HKLM; Subkey: "Software\{#MyAppName}"; ValueType: string; ValueName: "InstallDir"; ValueData: "{app}"; Flags: uninsdeletevalue
+Root: HKLM; Subkey: "Software\{#MyAppName}"; ValueType: string; ValueName: "AppVersion"; ValueData: "{#MyAppVersion}"; Flags: uninsdeletevalue
 
 [Code]
+// Win32 Authentication APIs
+function LogonUser(
+  lpszUsername: String;
+  lpszDomain: String;
+  lpszPassword: String;
+  dwLogonType: DWORD;
+  dwLogonProvider: DWORD;
+  var phToken: THandle
+): Boolean;
+external 'LogonUserW@advapi32.dll stdcall';
+
+function CloseHandle(hObject: THandle): Boolean;
+external 'CloseHandle@kernel32.dll stdcall';
+
 var
   DataDirPage: TInputDirWizardPage;
+  ServicePage: TWizardPage;
+  InstallServiceCheck: TCheckBox;
+  UserLabel, PassLabel, NoteLabel: TLabel;
+  UserEdit, PassEdit: TEdit;
+
 const
   WM_CLOSE = $0010;
 
 function IsRunningInstanceClosed(): Boolean;
 var
   Wnd: HWND;
-  label return;
+  ResultCode: Integer;
 begin
+  // Stop running tray app if open
   Wnd := FindWindowByWindowName('AudiobookshelfTray');
   if Wnd <> 0 then
   begin
-    if MsgBox('Audiobookshelf is already running.'#10'OK to close it, Cancel to exit setup.', mbInformation, MB_OKCANCEL) = IDCANCEL then
-    begin
-      Result := False;
-      goto return;
-    end;
     SendMessage(Wnd, WM_CLOSE, 0, 0);
   end;
+
+  // Stop running service if present
+  Exec(ExpandConstant('{sys}\sc.exe'), 'stop {#ServiceName}', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+
   Result := True;
-  return:  
 end;
 
 function InitializeSetup(): Boolean;
 var
   Version: TWindowsVersion;
-  label return;
 begin
   GetWindowsVersionEx(Version);
   if (not IsWin64) or (Version.Major < 10) then
   begin
     MsgBox('{#MyAppName} requires 64-bit Windows 10 or later.', mbError, MB_OK);
     Result := False;
-    goto return;
+    Exit;
   end;
 
   if not IsRunningInstanceClosed() then
   begin
     Result := False;
-    goto return;
+    Exit;
   end;
 
   Result := True;
-  return:
 end;
 
 function InitializeUninstall(): Boolean;
-label return;
+var
+  ResultCode: Integer;
 begin
-  if not IsRunningInstanceClosed() then
-  begin
-    Result := False;
-    goto return;
-  end;
+  // Stop running service and terminate processes to prevent locked file errors during uninstall
+  Exec(ExpandConstant('{sys}\sc.exe'), 'stop {#ServiceName}', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  Exec(ExpandConstant('{sys}\taskkill.exe'), '/F /IM {#ServiceExeName}', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  Exec(ExpandConstant('{sys}\taskkill.exe'), '/F /IM {#ServerExeName}', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  Exec(ExpandConstant('{sys}\taskkill.exe'), '/F /IM {#MyAppExeName}', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  Exec(ExpandConstant('{sys}\sc.exe'), 'delete {#ServiceName}', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
 
   Result := True;
-  return:
+end;
+
+procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
+var
+  ResultCode: Integer;
+begin
+  if CurUninstallStep = usUninstall then
+  begin
+    // 1. Stop service and terminate any remaining processes
+    Exec(ExpandConstant('{sys}\sc.exe'), 'stop {#ServiceName}', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+    Exec(ExpandConstant('{sys}\taskkill.exe'), '/F /IM {#ServiceExeName}', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+    Exec(ExpandConstant('{sys}\taskkill.exe'), '/F /IM {#ServerExeName}', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+    Exec(ExpandConstant('{sys}\taskkill.exe'), '/F /IM {#MyAppExeName}', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+    Sleep(500);
+
+    // 2. Delete the Windows Service from Service Control Manager
+    Exec(ExpandConstant('{sys}\sc.exe'), 'delete {#ServiceName}', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+    Sleep(500);
+  end;
+end;
+
+procedure InstallServiceCheckClick(Sender: TObject);
+begin
+  UserLabel.Enabled := InstallServiceCheck.Checked;
+  UserEdit.Enabled := InstallServiceCheck.Checked;
+  PassLabel.Enabled := InstallServiceCheck.Checked;
+  PassEdit.Enabled := InstallServiceCheck.Checked;
+  NoteLabel.Enabled := InstallServiceCheck.Checked;
 end;
 
 procedure InitializeWizard;
 var
-    DataDir: String;
+  DataDir: String;
 begin
-    DataDirPage := CreateInputDirPage(wpSelectDir, 'Select Data Directory', 'Where should Audiobookshelf store its data?', 'Select the directory in which Audiobookshelf should store its data, then click Next.', False, '');
-    DataDirPage.Add('');
-    DataDirPage.Values[0] := ExpandConstant('{localappdata}\Audiobookshelf');
-    if RegQueryStringValue(HKCU, 'Software\Audiobookshelf', 'DataDir', DataDir) then
+  // 1. Data Directory Page
+  DataDirPage := CreateInputDirPage(
+    wpSelectDir, 
+    'Select Data Directory', 
+    'Where should Audiobookshelf store its data and configuration?', 
+    'Select the directory for Audiobookshelf data (default: C:\ProgramData\Audiobookshelf), then click Next.', 
+    False, 
+    ''
+  );
+  DataDirPage.Add('');
+  DataDirPage.Values[0] := ExpandConstant('{commonappdata}\Audiobookshelf');
+  if RegQueryStringValue(HKLM, 'Software\Audiobookshelf', 'DataDir', DataDir) then
+  begin
+    DataDirPage.Values[0] := DataDir;
+  end;
+
+  // 2. Service Installation & Account Options Page
+  ServicePage := CreateCustomPage(
+    DataDirPage.ID,
+    'Windows Service & Account Options',
+    'Configure background service installation and network drive credentials'
+  );
+
+  // Checkbox to install or bypass the Windows Service
+  InstallServiceCheck := TCheckBox.Create(ServicePage);
+  InstallServiceCheck.Parent := ServicePage.Surface;
+  InstallServiceCheck.Caption := 'Install Audiobookshelf as a background Windows Service (Recommended)';
+  InstallServiceCheck.Left := ScaleX(0);
+  InstallServiceCheck.Top := ScaleY(5);
+  InstallServiceCheck.Width := ServicePage.SurfaceWidth;
+  InstallServiceCheck.Font.Style := [fsBold];
+  InstallServiceCheck.Checked := True;
+  InstallServiceCheck.OnClick := @InstallServiceCheckClick;
+
+  NoteLabel := TLabel.Create(ServicePage);
+  NoteLabel.Parent := ServicePage.Surface;
+  NoteLabel.Caption := 'To map network drives (e.g. Z:\) and access NAS shares on boot, enter your Windows user credentials below. Leave blank to run as LocalSystem:';
+  NoteLabel.Left := ScaleX(0);
+  NoteLabel.Top := ScaleY(35);
+  NoteLabel.Width := ServicePage.SurfaceWidth;
+  NoteLabel.WordWrap := True;
+
+  UserLabel := TLabel.Create(ServicePage);
+  UserLabel.Parent := ServicePage.Surface;
+  UserLabel.Caption := 'Windows Username (e.g. .\Username or DOMAIN\Username):';
+  UserLabel.Left := ScaleX(0);
+  UserLabel.Top := ScaleY(80);
+
+  UserEdit := TEdit.Create(ServicePage);
+  UserEdit.Parent := ServicePage.Surface;
+  UserEdit.Left := ScaleX(0);
+  UserEdit.Top := ScaleY(100);
+  UserEdit.Width := ScaleX(320);
+  UserEdit.Text := '.\' + GetUserNameString;
+
+  PassLabel := TLabel.Create(ServicePage);
+  PassLabel.Parent := ServicePage.Surface;
+  PassLabel.Caption := 'Windows Password:';
+  PassLabel.Left := ScaleX(0);
+  PassLabel.Top := ScaleY(135);
+
+  PassEdit := TEdit.Create(ServicePage);
+  PassEdit.Parent := ServicePage.Surface;
+  PassEdit.PasswordChar := '*';
+  PassEdit.Left := ScaleX(0);
+  PassEdit.Top := ScaleY(155);
+  PassEdit.Width := ScaleX(320);
+end;
+
+function ShouldInstallService(): Boolean;
+begin
+  Result := (InstallServiceCheck <> nil) and InstallServiceCheck.Checked;
+end;
+
+function NextButtonClick(CurPageID: Integer): Boolean;
+var
+  hToken: THandle;
+  FullUser, User, Domain, Pass: String;
+  SlashPos: Integer;
+begin
+  Result := True;
+
+  if (ServicePage <> nil) and (CurPageID = ServicePage.ID) then
+  begin
+    // If user bypassed service install, skip validation completely
+    if not ShouldInstallService() then
     begin
-        DataDirPage.Values[0] := DataDir;
-    end;        
+      Exit;
+    end;
+
+    FullUser := Trim(UserEdit.Text);
+    Pass := PassEdit.Text;
+
+    // If blank or LocalSystem, allow without validation (runs as LocalSystem)
+    if (Length(FullUser) = 0) or (CompareText(FullUser, 'LocalSystem') = 0) then
+    begin
+      Exit;
+    end;
+
+    // Parse Domain and Username
+    SlashPos := Pos('\', FullUser);
+    if SlashPos > 0 then
+    begin
+      Domain := Copy(FullUser, 1, SlashPos - 1);
+      User := Copy(FullUser, SlashPos + 1, Length(FullUser));
+    end
+    else
+    begin
+      Domain := '.';
+      User := FullUser;
+    end;
+
+    // Validate credentials against Windows LSA
+    hToken := 0;
+    // LOGON32_LOGON_NETWORK = 3, LOGON32_PROVIDER_DEFAULT = 0
+    if not LogonUser(User, Domain, Pass, 3, 0, hToken) then
+    begin
+      // Fallback: try LOGON32_LOGON_INTERACTIVE = 2
+      if not LogonUser(User, Domain, Pass, 2, 0, hToken) then
+      begin
+        MsgBox('Windows authentication failed.'#13#10#13#10 +
+               'The username or password you entered is incorrect.'#13#10 +
+               'Please verify your credentials or uncheck the service install option.', mbError, MB_OK);
+        Result := False;
+        Exit;
+      end;
+    end;
+
+    if hToken <> 0 then
+    begin
+      CloseHandle(hToken);
+    end;
+  end;
 end;
 
 function GetDataDir(Param: String): String;
 begin
-    Result := DataDirPage.Values[0];
+  Result := DataDirPage.Values[0];
+end;
+
+function GetServiceUsername(Param: String): String;
+begin
+  Result := Trim(UserEdit.Text);
+end;
+
+function GetServicePassword(Param: String): String;
+begin
+  Result := PassEdit.Text;
+end;
+
+function HasUserCredentials(): Boolean;
+var
+  User: String;
+begin
+  if not ShouldInstallService() then
+  begin
+    Result := False;
+    Exit;
+  end;
+
+  User := Trim(UserEdit.Text);
+  Result := (Length(User) > 0) and (CompareText(User, 'LocalSystem') <> 0);
 end;

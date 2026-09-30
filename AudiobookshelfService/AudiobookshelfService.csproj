@@ -1,0 +1,39 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <LangVersion>latest</LangVersion>
+    <TargetFramework>net461</TargetFramework>
+    <Nullable>disable</Nullable>
+    <Platforms>x64</Platforms>
+    <StartupObject>AudiobookshelfService.Program</StartupObject>
+    <ApplicationIcon>Resources\AppIcon.ico</ApplicationIcon>
+    <RootNamespace>AudiobookshelfService</RootNamespace>
+    <AssemblyName>AudiobookshelfService</AssemblyName>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Content Include="Resources\AppIcon.ico" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Audiobookshelf.Common\Audiobookshelf.Common.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="NLog" Version="5.2.8" />
+    <PackageReference Include="Newtonsoft.Json" Version="13.0.3" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Reference Include="System.ServiceProcess" />
+    <Reference Include="System.Configuration.Install" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Update="App.config">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+  </ItemGroup>
+
+</Project>

@@ -1,14 +1,16 @@
-﻿<Project Sdk="Microsoft.NET.Sdk">
+<Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
     <OutputType>WinExe</OutputType>
-	<LangVersion>latest</LangVersion>
+    <LangVersion>latest</LangVersion>
     <TargetFramework>net461</TargetFramework>
     <Nullable>disable</Nullable>
     <UseWindowsForms>true</UseWindowsForms>
     <Platforms>x64</Platforms>
     <GenerateResourceUsePreserializedResources>true</GenerateResourceUsePreserializedResources>
     <ApplicationIcon>Resources\AppIcon.ico</ApplicationIcon>
+    <RootNamespace>AudiobookshelfTray</RootNamespace>
+    <AssemblyName>AudiobookshelfTray</AssemblyName>
   </PropertyGroup>
 
   <ItemGroup>
@@ -16,9 +18,18 @@
   </ItemGroup>
 
   <ItemGroup>
+    <ProjectReference Include="..\Audiobookshelf.Common\Audiobookshelf.Common.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Newtonsoft.Json" Version="13.0.3" />
     <PackageReference Include="NLog" Version="5.2.8" />
     <PackageReference Include="Octokit" Version="9.0.0" />
-	<PackageReference Include="System.Resources.Extensions" Version="4.6.0" />
+    <PackageReference Include="System.Resources.Extensions" Version="4.6.0" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Reference Include="System.ServiceProcess" />
   </ItemGroup>
 
   <ItemGroup>
@@ -49,10 +60,6 @@
       <Generator>SettingsSingleFileGenerator</Generator>
       <LastGenOutput>Settings.Designer.cs</LastGenOutput>
     </None>
-  </ItemGroup>
-
-  <ItemGroup>
-    <Folder Include="obj\" />
   </ItemGroup>
 
 </Project>
