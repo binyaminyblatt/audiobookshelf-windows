@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.ComponentModel;
 using System.Diagnostics;
+using System.Drawing;
 using System.IO;
 using System.Linq;
 using System.Net;
@@ -18,6 +19,9 @@ namespace AudiobookshelfTray
         private readonly AppTray _app;
         private readonly Settings _originalSettings;
         private readonly List<DriveMap> _workingDriveMaps = new List<DriveMap>();
+
+        private Panel _drivesBanner = null;
+        private Panel _updatesBanner = null;
 
         public SettingsDialog(AppTray app)
         {
@@ -51,6 +55,113 @@ namespace AudiobookshelfTray
             checkBoxGitHubUpdates.Checked = _originalSettings.AutoUpdateFromGitHub;
             checkBoxFolderUpdates.Checked = _originalSettings.AutoApplyFolderUpdates;
             textBoxUpdatesFolder.Text = Settings.GetDefaultUpdatesDir();
+
+            // If Windows Service is not installed, disable Drive Mappings and Updates tabs and show Install Service button
+            bool isServiceInstalled = ServiceControllerHelper.IsServiceInstalled();
+            if (!isServiceInstalled)
+            {
+                tabPageDrives.Enabled = false;
+                tabPageUpdates.Enabled = false;
+
+                _drivesBanner = new Panel
+                {
+                    Dock = DockStyle.Top,
+                    Height = 44,
+                    BackColor = System.Drawing.Color.FromArgb(254, 243, 199),
+                    Padding = new Padding(10, 6, 10, 6)
+                };
+
+                var btnInstallDrives = new Button
+                {
+                    Text = "Install Service...",
+                    Dock = DockStyle.Right,
+                    Width = 125,
+                    Font = new Font(this.Font, FontStyle.Bold),
+                    Cursor = Cursors.Hand,
+                    UseVisualStyleBackColor = true
+                };
+                btnInstallDrives.Click += ButtonInstallService_Click;
+
+                var drivesLabel = new Label
+                {
+                    Text = "⚠️ Network drive mapping requires Audiobookshelf to be installed as a Windows Service.",
+                    Dock = DockStyle.Fill,
+                    ForeColor = System.Drawing.Color.FromArgb(146, 64, 14),
+                    TextAlign = System.Drawing.ContentAlignment.MiddleLeft,
+                    Font = new System.Drawing.Font(this.Font, System.Drawing.FontStyle.Bold)
+                };
+
+                _drivesBanner.Controls.Add(drivesLabel);
+                _drivesBanner.Controls.Add(btnInstallDrives);
+                tabPageDrives.Controls.Add(_drivesBanner);
+                _drivesBanner.BringToFront();
+
+                _updatesBanner = new Panel
+                {
+                    Dock = DockStyle.Top,
+                    Height = 44,
+                    BackColor = System.Drawing.Color.FromArgb(254, 243, 199),
+                    Padding = new Padding(10, 6, 10, 6)
+                };
+
+                var btnInstallUpdates = new Button
+                {
+                    Text = "Install Service...",
+                    Dock = DockStyle.Right,
+                    Width = 125,
+                    Font = new Font(this.Font, FontStyle.Bold),
+                    Cursor = Cursors.Hand,
+                    UseVisualStyleBackColor = true
+                };
+                btnInstallUpdates.Click += ButtonInstallService_Click;
+
+                var updatesLabel = new Label
+                {
+                    Text = "⚠️ Automated background updates and backups require the Audiobookshelf Windows Service.",
+                    Dock = DockStyle.Fill,
+                    ForeColor = System.Drawing.Color.FromArgb(146, 64, 14),
+                    TextAlign = System.Drawing.ContentAlignment.MiddleLeft,
+                    Font = new System.Drawing.Font(this.Font, System.Drawing.FontStyle.Bold)
+                };
+
+                _updatesBanner.Controls.Add(updatesLabel);
+                _updatesBanner.Controls.Add(btnInstallUpdates);
+                tabPageUpdates.Controls.Add(_updatesBanner);
+                _updatesBanner.BringToFront();
+            }
+        }
+
+        private void ButtonInstallService_Click(object sender, EventArgs e)
+        {
+            using (var dlg = new InstallServiceDialog())
+            {
+                if (dlg.ShowDialog(this) == DialogResult.OK)
+                {
+                    tabPageDrives.Enabled = true;
+                    tabPageUpdates.Enabled = true;
+
+                    if (_drivesBanner != null)
+                    {
+                        tabPageDrives.Controls.Remove(_drivesBanner);
+                        _drivesBanner.Dispose();
+                        _drivesBanner = null;
+                    }
+
+                    if (_updatesBanner != null)
+                    {
+                        tabPageUpdates.Controls.Remove(_updatesBanner);
+                        _updatesBanner.Dispose();
+                        _updatesBanner = null;
+                    }
+
+                    MessageBox.Show(
+                        "Audiobookshelf Windows Service installed and started successfully!\n\nDrive mapping and automated updates are now enabled.",
+                        "Audiobookshelf Service Installed",
+                        MessageBoxButtons.OK,
+                        MessageBoxIcon.Information
+                    );
+                }
+            }
         }
 
         private void RefreshDriveListView()
@@ -119,6 +230,7 @@ namespace AudiobookshelfTray
                 if (MessageBox.Show($"Remove drive mapping for {selected.GetNormalizedDriveLetter()} -> {selected.ShareName}?",
                     "Confirm Remove", MessageBoxButtons.YesNo, MessageBoxIcon.Question) == DialogResult.Yes)
                 {
+                    DriveMap.SetDriveHidden(selected.DriveLetter, false);
                     _workingDriveMaps.Remove(selected);
                     RefreshDriveListView();
                 }
@@ -238,8 +350,10 @@ namespace AudiobookshelfTray
                 return;
             }
 
+            bool isServiceInstalled = ServiceControllerHelper.IsServiceInstalled();
             string apiKey = textBoxApiKey.Text.Trim();
-            if (checkBoxGitHubUpdates.Checked && string.IsNullOrEmpty(apiKey))
+
+            if (isServiceInstalled && checkBoxGitHubUpdates.Checked && string.IsNullOrEmpty(apiKey))
             {
                 var res = MessageBox.Show("GitHub auto-updates require an Admin API Key to perform pre-update backups.\nAre you sure you want to enable updates without configuring a key now?", "Admin API Key Required", MessageBoxButtons.YesNo, MessageBoxIcon.Warning);
                 if (res == DialogResult.No)
@@ -253,34 +367,34 @@ namespace AudiobookshelfTray
             var newSettings = SettingsHandler.Load();
             newSettings.ServerPort = textBoxPort.Text.Trim();
             newSettings.DataDir = textBoxDataFolder.Text.Trim();
-            newSettings.DriveMaps = new List<DriveMap>(_workingDriveMaps);
-            newSettings.AutoRemount = checkBoxAutoRemount.Checked;
-            newSettings.AutoRemountCount = (int)numericUpDownRetryCount.Value;
-            newSettings.AutoRemountDelay = (int)numericUpDownRetryDelay.Value;
-            newSettings.StartServerOnMountFail = checkBoxStartOnFail.Checked;
-            newSettings.AdminApiKey = apiKey;
-            newSettings.AutoUpdateFromGitHub = checkBoxGitHubUpdates.Checked;
-            newSettings.AutoApplyFolderUpdates = checkBoxFolderUpdates.Checked;
+
+            if (isServiceInstalled)
+            {
+                newSettings.DriveMaps = new List<DriveMap>(_workingDriveMaps);
+                newSettings.AutoRemount = checkBoxAutoRemount.Checked;
+                newSettings.AutoRemountCount = (int)numericUpDownRetryCount.Value;
+                newSettings.AutoRemountDelay = (int)numericUpDownRetryDelay.Value;
+                newSettings.StartServerOnMountFail = checkBoxStartOnFail.Checked;
+                newSettings.AdminApiKey = apiKey;
+                newSettings.AutoUpdateFromGitHub = checkBoxGitHubUpdates.Checked;
+                newSettings.AutoApplyFolderUpdates = checkBoxFolderUpdates.Checked;
+
+                DriveMap.SyncHiddenDrives(_workingDriveMaps);
+            }
 
             SettingsHandler.Save(newSettings);
 
-            if (ServiceControllerHelper.IsServiceInstalled())
-            {
-                var result = MessageBox.Show(
-                    "Settings saved successfully.\nWould you like to restart the Audiobookshelf Service now to apply changes?",
-                    "Audiobookshelf",
-                    MessageBoxButtons.YesNo,
-                    MessageBoxIcon.Question
-                );
+            string targetName = isServiceInstalled ? "Audiobookshelf Service" : "Audiobookshelf Server";
+            var result = MessageBox.Show(
+                $"Settings saved successfully.\nWould you like to restart the {targetName} now to apply changes?",
+                "Audiobookshelf",
+                MessageBoxButtons.YesNo,
+                MessageBoxIcon.Question
+            );
 
-                if (result == DialogResult.Yes)
-                {
-                    _app.RestartServiceClicked(sender, e);
-                }
-            }
-            else
+            if (result == DialogResult.Yes)
             {
-                MessageBox.Show("Settings saved successfully.", "Audiobookshelf", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                _app.RestartServiceClicked(sender, e);
             }
 
             Close();

@@ -61,9 +61,11 @@ Filename: "{sys}\sc.exe"; Parameters: "create {#ServiceName} binPath= ""{app}\{#
 Filename: "{sys}\sc.exe"; Parameters: "description {#ServiceName} ""Audiobookshelf Background Server and Network Drive Supervisor"""; Flags: runhidden; Check: ShouldInstallService
 ; 3. Configure service user account if provided
 Filename: "{sys}\sc.exe"; Parameters: "config {#ServiceName} obj= ""{code:GetServiceUsername}"" password= ""{code:GetServicePassword}"""; Flags: runhidden; Check: HasUserCredentials
-; 4. Start the service
+; 4. Grant start/stop/control service permissions to interactive and authenticated users
+Filename: "{sys}\sc.exe"; Parameters: "sdset {#ServiceName} ""D:(A;;CCLCSWRPWPDTLORC;;;SY)(A;;CCDCLCSWRPWPDTLOCRSDRCWDWO;;;BA)(A;;CCLCSWRPWPDTLORC;;;IU)(A;;CCLCSWRPWPDTLORC;;;AU)(A;;CCLCSWRPWPDTLORC;;;PU)S:(AU;FA;CCDCLCSWRPWPDTLOCRSDRCWDWO;;;WD)"""; Flags: runhidden; Check: ShouldInstallService
+; 5. Start the service
 Filename: "{sys}\net.exe"; Parameters: "start {#ServiceName}"; Flags: runhidden; Check: ShouldInstallService
-; 5. Launch Tray application
+; 6. Launch Tray application
 Filename: "{app}\{#MyAppExeName}"; Description: "{cm:LaunchProgram,{#StringChange(MyAppName, '&', '&&')}}"; Flags: nowait postinstall
 
 [UninstallRun]
@@ -226,7 +228,7 @@ begin
 
   NoteLabel := TLabel.Create(ServicePage);
   NoteLabel.Parent := ServicePage.Surface;
-  NoteLabel.Caption := 'To map network drives (e.g. Z:\) and access NAS shares on boot, enter your Windows user credentials below. Leave blank to run as LocalSystem:';
+  NoteLabel.Caption := 'Windows user credentials are required to run the service so it can authenticate and mount network drives (e.g. Z:\):';
   NoteLabel.Left := ScaleX(0);
   NoteLabel.Top := ScaleY(35);
   NoteLabel.Width := ServicePage.SurfaceWidth;
@@ -274,18 +276,32 @@ begin
 
   if (ServicePage <> nil) and (CurPageID = ServicePage.ID) then
   begin
-    // If user bypassed service install, skip validation completely
+    // If user bypassed service install, warn that drive mapping and updates will not work
     if not ShouldInstallService() then
     begin
+      if MsgBox('Warning: You have chosen not to install the Audiobookshelf Windows Service.'#13#10#13#10 +
+                'Without the background Windows Service:'#13#10 +
+                ' • Network drive mappings will not be mounted automatically.'#13#10 +
+                ' • Scheduled background updates and pre-update backups will be disabled.'#13#10#13#10 +
+                'Are you sure you want to continue without installing the Windows Service?',
+                mbConfirmation, MB_YESNO) = IDNO then
+      begin
+        Result := False;
+        Exit;
+      end;
       Exit;
     end;
 
     FullUser := Trim(UserEdit.Text);
     Pass := PassEdit.Text;
 
-    // If blank or LocalSystem, allow without validation (runs as LocalSystem)
-    if (Length(FullUser) = 0) or (CompareText(FullUser, 'LocalSystem') = 0) then
+    // Credentials are required for network drive access
+    if (Length(FullUser) = 0) or (Length(Pass) = 0) then
     begin
+      MsgBox('Windows user credentials (Username and Password) are required to install the service.'#13#10#13#10 +
+             'The service requires account credentials to authenticate and mount network drives on startup.'#13#10#13#10 +
+             'Please enter your Windows password or uncheck the service install option.', mbError, MB_OK);
+      Result := False;
       Exit;
     end;
 
@@ -341,15 +357,6 @@ begin
 end;
 
 function HasUserCredentials(): Boolean;
-var
-  User: String;
 begin
-  if not ShouldInstallService() then
-  begin
-    Result := False;
-    Exit;
-  end;
-
-  User := Trim(UserEdit.Text);
-  Result := (Length(User) > 0) and (CompareText(User, 'LocalSystem') <> 0);
+  Result := ShouldInstallService() and (Length(Trim(UserEdit.Text)) > 0);
 end;

@@ -39,48 +39,67 @@ namespace Audiobookshelf.Common
         /// </summary>
         public static void StopProcess(Process process)
         {
-            if (process == null || process.HasExited)
+            if (process == null)
             {
                 return;
             }
 
-            int pid = process.Id;
-
-            if (AttachConsole((uint)pid))
+            try
             {
-                SetConsoleCtrlHandler(null, true);
-                bool ctrlCSent = GenerateConsoleCtrlEvent(CtrlTypes.CTRL_C_EVENT, 0);
-                if (ctrlCSent)
+                if (process.HasExited)
                 {
-                    _logger.Debug("Sent Ctrl+C to process. Waiting for it to exit");
+                    return;
+                }
+
+                int pid = process.Id;
+
+                try
+                {
+                    if (AttachConsole((uint)pid))
+                    {
+                        SetConsoleCtrlHandler(null, true);
+                        bool ctrlCSent = GenerateConsoleCtrlEvent(CtrlTypes.CTRL_C_EVENT, 0);
+                        if (ctrlCSent)
+                        {
+                            _logger.Debug($"Sent Ctrl+C to process {pid}. Waiting for it to exit...");
+                            try
+                            {
+                                if (!process.WaitForExit(4000))
+                                {
+                                    _logger.Warn($"Process {pid} did not exit within 4 seconds of Ctrl+C");
+                                }
+                            }
+                            catch (Exception e)
+                            {
+                                _logger.Error($"Exception thrown by Process.WaitForExit: {e}");
+                            }
+                        }
+                        SetConsoleCtrlHandler(null, false);
+                        FreeConsole();
+                    }
+                }
+                catch (Exception ex)
+                {
+                    _logger.Debug($"AttachConsole/Ctrl+C attempt error on PID {pid}: {ex.Message}");
+                }
+
+                if (!process.HasExited)
+                {
+                    _logger.Info($"Terminating process {pid} via Kill...");
                     try
                     {
-                        if (!process.WaitForExit(8000))
-                        {
-                            _logger.Error("Process did not exit within 8 seconds");
-                        }
+                        process.Kill();
+                        process.WaitForExit(3000);
                     }
                     catch (Exception e)
                     {
-                        _logger.Error($"Exception thrown by Process.WaitForExit: {e}");
+                        _logger.Error($"Exception thrown by Process.Kill: {e}");
                     }
                 }
-                SetConsoleCtrlHandler(null, false);
-                FreeConsole();
             }
-
-            if (!process.HasExited)
+            catch (Exception ex)
             {
-                _logger.Error("Failed to send Ctrl+C to process. Killing it instead");
-                try
-                {
-                    process.Kill();
-                    process.WaitForExit();
-                }
-                catch (Exception e)
-                {
-                    _logger.Error($"Exception thrown by Process.Kill: {e}");
-                }
+                _logger.Debug($"Error in StopProcess: {ex.Message}");
             }
         }
     }

@@ -21,10 +21,10 @@ namespace AudiobookshelfTray
             selectAllToolStripMenuItem.Click += new EventHandler(SelectAllToolStripMenuItem_Click);
             copySelectedToolStripMenuItem.Click += new EventHandler(CopySelectedToolStripMenuItem_Click);
 
-            string dataDir = Path.Combine(
-                Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
-                "Audiobookshelf"
-            );
+            var settings = Audiobookshelf.Common.SettingsHandler.Load();
+            string dataDir = string.IsNullOrWhiteSpace(settings.DataDir)
+                ? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "Audiobookshelf")
+                : settings.DataDir;
             _logFilePath = Path.Combine(dataDir, "logs", "server.log");
 
             LoadInitialLogs();

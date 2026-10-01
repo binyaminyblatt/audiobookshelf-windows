@@ -1,6 +1,7 @@
 using System;
 using System.ServiceProcess;
 using System.Threading;
+using Audiobookshelf.Common;
 using NLog;
 
 namespace AudiobookshelfService

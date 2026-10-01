@@ -61,6 +61,16 @@ namespace Audiobookshelf.Common
         [JsonProperty]
         public string AppVersion { get; set; } = string.Empty;
 
+        // Custom environment variables passed to the audiobookshelf server process
+        private Dictionary<string, string> _envs = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+
+        [JsonProperty("envs")]
+        public Dictionary<string, string> Envs
+        {
+            get => _envs ?? (_envs = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase));
+            set => _envs = value != null ? new Dictionary<string, string>(value, StringComparer.OrdinalIgnoreCase) : new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        }
+
         public static string GetDefaultDataDir()
         {
             return Path.Combine(

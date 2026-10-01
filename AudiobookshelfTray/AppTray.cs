@@ -28,7 +28,9 @@ namespace AudiobookshelfTray
         private ServerLogs _serverLogsForm = null;
         private bool _shouldExit = false;
         private bool _runInstall = false;
+        private bool _isOperatingService = false;
         private string _installerPath;
+        private ServerMonitor _localServerMonitor = null;
 
         private readonly NotifyIcon _trayIcon;
         private readonly ToolStripMenuItem _stopServerMenuItem;
@@ -116,7 +118,18 @@ namespace AudiobookshelfTray
 
             System.Windows.Forms.Application.ApplicationExit += ApplicationExited;
 
-            // Timer for checking service status
+            // If service is not installed, initialize local ServerMonitor for standalone process mode
+            if (!ServiceControllerHelper.IsServiceInstalled())
+            {
+                _localServerMonitor = new ServerMonitor();
+                if (!IsLocalServerProcessRunning())
+                {
+                    _logger.Info("Service not installed. Starting Audiobookshelf standalone server process...");
+                    _localServerMonitor.Start();
+                }
+            }
+
+            // Timer for checking service / server status
             _statusTimer.Interval = 2000;
             _statusTimer.Tick += (s, e) => UpdateServiceStatusUI();
             _statusTimer.Start();
@@ -129,39 +142,111 @@ namespace AudiobookshelfTray
             }
         }
 
+        private bool IsLocalServerProcessRunning()
+        {
+            if (_localServerMonitor != null && _localServerMonitor.IsRunning) return true;
+            try
+            {
+                return Process.GetProcessesByName(Path.GetFileNameWithoutExtension(ServerMonitor.SERVER_BINARY)).Length > 0;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
         private void UpdateServiceStatusUI()
         {
-            bool isInstalled = ServiceControllerHelper.IsServiceInstalled();
-            if (!isInstalled)
+            if (MainForm != null && MainForm.InvokeRequired)
             {
-                _startServerMenuItem.Enabled = false;
-                _stopServerMenuItem.Enabled = false;
-                _restartServerMenuItem.Enabled = false;
-                _trayIcon.Text = "Audiobookshelf (Service Not Installed)";
+                try
+                {
+                    MainForm.BeginInvoke(new Action(UpdateServiceStatusUI));
+                }
+                catch { }
                 return;
             }
 
-            var status = ServiceControllerHelper.GetServiceStatus();
-            if (status == ServiceControllerStatus.Running)
+            if (_isOperatingService)
             {
-                _startServerMenuItem.Enabled = false;
-                _stopServerMenuItem.Enabled = true;
-                _restartServerMenuItem.Enabled = true;
-                _trayIcon.Text = "Audiobookshelf - Service Running";
+                return;
             }
-            else if (status == ServiceControllerStatus.Stopped)
+
+            bool isInstalled = ServiceControllerHelper.IsServiceInstalled();
+            _openServerMenuItem.Enabled = true;
+
+            if (isInstalled)
             {
-                _startServerMenuItem.Enabled = true;
-                _stopServerMenuItem.Enabled = false;
-                _restartServerMenuItem.Enabled = false;
-                _trayIcon.Text = "Audiobookshelf - Service Stopped";
+                if (_localServerMonitor != null && _localServerMonitor.IsRunning)
+                {
+                    _logger.Info("Service is installed; stopping local standalone server monitor.");
+                    _localServerMonitor.Stop();
+                }
+
+                _startServerMenuItem.Text = "Start Service";
+                _stopServerMenuItem.Text = "Stop Service";
+                _restartServerMenuItem.Text = "Restart Service";
+
+                var status = ServiceControllerHelper.GetServiceStatus();
+                if (status == ServiceControllerStatus.Running)
+                {
+                    _startServerMenuItem.Enabled = false;
+                    _stopServerMenuItem.Enabled = true;
+                    _restartServerMenuItem.Enabled = true;
+                    _trayIcon.Text = "Audiobookshelf - Service Running";
+                }
+                else if (status == ServiceControllerStatus.Stopped)
+                {
+                    _startServerMenuItem.Enabled = true;
+                    _stopServerMenuItem.Enabled = false;
+                    _restartServerMenuItem.Enabled = false;
+                    _trayIcon.Text = "Audiobookshelf - Service Stopped";
+                }
+                else if (status == ServiceControllerStatus.StartPending)
+                {
+                    _startServerMenuItem.Enabled = false;
+                    _stopServerMenuItem.Enabled = false;
+                    _restartServerMenuItem.Enabled = false;
+                    _trayIcon.Text = "Audiobookshelf - Starting Service...";
+                }
+                else if (status == ServiceControllerStatus.StopPending)
+                {
+                    _startServerMenuItem.Enabled = false;
+                    _stopServerMenuItem.Enabled = false;
+                    _restartServerMenuItem.Enabled = false;
+                    _trayIcon.Text = "Audiobookshelf - Stopping Service...";
+                }
+                else
+                {
+                    _startServerMenuItem.Enabled = false;
+                    _stopServerMenuItem.Enabled = false;
+                    _restartServerMenuItem.Enabled = false;
+                    string statusText = status.HasValue ? status.ToString() : "Unknown";
+                    _trayIcon.Text = $"Audiobookshelf - {statusText}";
+                }
             }
             else
             {
-                _startServerMenuItem.Enabled = false;
-                _stopServerMenuItem.Enabled = false;
-                _restartServerMenuItem.Enabled = false;
-                _trayIcon.Text = $"Audiobookshelf - {status}";
+                // Standalone process mode
+                _startServerMenuItem.Text = "Start Server";
+                _stopServerMenuItem.Text = "Stop Server";
+                _restartServerMenuItem.Text = "Restart Server";
+
+                bool isRunning = IsLocalServerProcessRunning();
+                if (isRunning)
+                {
+                    _startServerMenuItem.Enabled = false;
+                    _stopServerMenuItem.Enabled = true;
+                    _restartServerMenuItem.Enabled = true;
+                    _trayIcon.Text = "Audiobookshelf - Server Running";
+                }
+                else
+                {
+                    _startServerMenuItem.Enabled = true;
+                    _stopServerMenuItem.Enabled = false;
+                    _restartServerMenuItem.Enabled = false;
+                    _trayIcon.Text = "Audiobookshelf - Server Stopped";
+                }
             }
         }
 
@@ -239,78 +324,301 @@ namespace AudiobookshelfTray
 
         public void StartServiceClicked(object sender, EventArgs e)
         {
+            if (_isOperatingService) return;
+            _isOperatingService = true;
+
+            bool isInstalled = ServiceControllerHelper.IsServiceInstalled();
+            _startServerMenuItem.Enabled = false;
+            _stopServerMenuItem.Enabled = false;
+            _restartServerMenuItem.Enabled = false;
+            _trayIcon.Text = isInstalled ? "Audiobookshelf - Starting Service..." : "Audiobookshelf - Starting Server...";
+
             Task.Run(() =>
             {
-                _logger.Info("Starting Audiobookshelf Service...");
-                bool started = ServiceControllerHelper.StartService();
-                if (started)
+                try
                 {
-                    _trayIcon.ShowBalloonTip(1000, "Audiobookshelf", "Service started successfully", ToolTipIcon.Info);
+                    if (isInstalled)
+                    {
+                        _logger.Info("Starting Audiobookshelf Service...");
+                        bool started = ServiceControllerHelper.StartService();
+                        if (started)
+                        {
+                            _trayIcon.ShowBalloonTip(1500, "Audiobookshelf", "Audiobookshelf Service started successfully.", ToolTipIcon.Info);
+                        }
+                        else
+                        {
+                            _trayIcon.ShowBalloonTip(3000, "Audiobookshelf", "Failed to start Audiobookshelf Service. Check Server Logs for details.", ToolTipIcon.Error);
+                        }
+                    }
+                    else
+                    {
+                        _logger.Info("Starting Audiobookshelf standalone server process...");
+                        if (_localServerMonitor == null)
+                        {
+                            _localServerMonitor = new ServerMonitor();
+                        }
+                        _localServerMonitor.Start();
+
+                        // Give it up to 4 seconds to start up
+                        for (int i = 0; i < 8; i++)
+                        {
+                            if (IsLocalServerProcessRunning()) break;
+                            System.Threading.Thread.Sleep(500);
+                        }
+
+                        if (IsLocalServerProcessRunning())
+                        {
+                            _trayIcon.ShowBalloonTip(1500, "Audiobookshelf", "Audiobookshelf server process started.", ToolTipIcon.Info);
+                        }
+                        else
+                        {
+                            _trayIcon.ShowBalloonTip(3000, "Audiobookshelf", "Failed to start server process. Check Server Logs for details.", ToolTipIcon.Error);
+                        }
+                    }
                 }
-                else
+                catch (Exception ex)
                 {
-                    _trayIcon.ShowBalloonTip(2000, "Audiobookshelf", "Failed to start service", ToolTipIcon.Error);
+                    _logger.Error($"Start operation error: {ex}");
+                    _trayIcon.ShowBalloonTip(3000, "Audiobookshelf", $"Error starting: {ex.Message}", ToolTipIcon.Error);
+                }
+                finally
+                {
+                    _isOperatingService = false;
+                    UpdateServiceStatusUI();
                 }
             });
         }
 
         public void StopServiceClicked(object sender, EventArgs e)
         {
+            if (_isOperatingService) return;
+            _isOperatingService = true;
+
+            bool isInstalled = ServiceControllerHelper.IsServiceInstalled();
+            _startServerMenuItem.Enabled = false;
+            _stopServerMenuItem.Enabled = false;
+            _restartServerMenuItem.Enabled = false;
+            _trayIcon.Text = isInstalled ? "Audiobookshelf - Stopping Service..." : "Audiobookshelf - Stopping Server...";
+
             Task.Run(() =>
             {
-                _logger.Info("Stopping Audiobookshelf Service...");
-                bool stopped = ServiceControllerHelper.StopService();
-                if (stopped)
+                try
                 {
-                    _trayIcon.ShowBalloonTip(1000, "Audiobookshelf", "Service stopped", ToolTipIcon.Info);
+                    if (isInstalled)
+                    {
+                        _logger.Info("Stopping Audiobookshelf Service...");
+                        bool stopped = ServiceControllerHelper.StopService();
+                        if (stopped)
+                        {
+                            _trayIcon.ShowBalloonTip(1500, "Audiobookshelf", "Audiobookshelf Service stopped.", ToolTipIcon.Info);
+                        }
+                        else
+                        {
+                            _trayIcon.ShowBalloonTip(3000, "Audiobookshelf", "Failed to stop Audiobookshelf Service.", ToolTipIcon.Error);
+                        }
+                    }
+                    else
+                    {
+                        _logger.Info("Stopping Audiobookshelf standalone server process...");
+                        if (_localServerMonitor != null)
+                        {
+                            _localServerMonitor.Stop();
+                        }
+
+                        // Ensure any remaining processes are terminated
+                        try
+                        {
+                            var procName = Path.GetFileNameWithoutExtension(ServerMonitor.SERVER_BINARY);
+                            foreach (var proc in Process.GetProcessesByName(procName))
+                            {
+                                try
+                                {
+                                    proc.Kill();
+                                    proc.WaitForExit(2000);
+                                }
+                                catch { }
+                            }
+                        }
+                        catch { }
+
+                        _trayIcon.ShowBalloonTip(1500, "Audiobookshelf", "Audiobookshelf server stopped.", ToolTipIcon.Info);
+                    }
                 }
-                else
+                catch (Exception ex)
                 {
-                    _trayIcon.ShowBalloonTip(2000, "Audiobookshelf", "Failed to stop service", ToolTipIcon.Error);
+                    _logger.Error($"Stop operation error: {ex}");
+                    _trayIcon.ShowBalloonTip(3000, "Audiobookshelf", $"Error stopping: {ex.Message}", ToolTipIcon.Error);
+                }
+                finally
+                {
+                    _isOperatingService = false;
+                    UpdateServiceStatusUI();
                 }
             });
         }
 
         public void RestartServiceClicked(object sender, EventArgs e)
         {
+            if (_isOperatingService) return;
+            _isOperatingService = true;
+
+            bool isInstalled = ServiceControllerHelper.IsServiceInstalled();
+            _startServerMenuItem.Enabled = false;
+            _stopServerMenuItem.Enabled = false;
+            _restartServerMenuItem.Enabled = false;
+            _trayIcon.Text = isInstalled ? "Audiobookshelf - Restarting Service..." : "Audiobookshelf - Restarting Server...";
+
             Task.Run(() =>
             {
-                _logger.Info("Restarting Audiobookshelf Service...");
-                bool restarted = ServiceControllerHelper.RestartService();
-                if (restarted)
+                try
                 {
-                    _trayIcon.ShowBalloonTip(1000, "Audiobookshelf", "Service restarted successfully", ToolTipIcon.Info);
+                    if (isInstalled)
+                    {
+                        _logger.Info("Restarting Audiobookshelf Service...");
+                        bool restarted = ServiceControllerHelper.RestartService();
+                        if (restarted)
+                        {
+                            _trayIcon.ShowBalloonTip(1500, "Audiobookshelf", "Audiobookshelf Service restarted successfully.", ToolTipIcon.Info);
+                        }
+                        else
+                        {
+                            _trayIcon.ShowBalloonTip(3000, "Audiobookshelf", "Failed to restart Audiobookshelf Service. Check Server Logs for details.", ToolTipIcon.Error);
+                        }
+                    }
+                    else
+                    {
+                        _logger.Info("Restarting Audiobookshelf standalone server process...");
+                        if (_localServerMonitor == null)
+                        {
+                            _localServerMonitor = new ServerMonitor();
+                        }
+                        _localServerMonitor.Restart();
+
+                        // Give it up to 4 seconds to start up
+                        for (int i = 0; i < 8; i++)
+                        {
+                            if (IsLocalServerProcessRunning()) break;
+                            System.Threading.Thread.Sleep(500);
+                        }
+
+                        if (IsLocalServerProcessRunning())
+                        {
+                            _trayIcon.ShowBalloonTip(1500, "Audiobookshelf", "Audiobookshelf server process restarted.", ToolTipIcon.Info);
+                        }
+                        else
+                        {
+                            _trayIcon.ShowBalloonTip(3000, "Audiobookshelf", "Failed to restart server process. Check Server Logs for details.", ToolTipIcon.Error);
+                        }
+                    }
                 }
-                else
+                catch (Exception ex)
                 {
-                    _trayIcon.ShowBalloonTip(2000, "Audiobookshelf", "Failed to restart service", ToolTipIcon.Error);
+                    _logger.Error($"Restart operation error: {ex}");
+                    _trayIcon.ShowBalloonTip(3000, "Audiobookshelf", $"Error restarting: {ex.Message}", ToolTipIcon.Error);
+                }
+                finally
+                {
+                    _isOperatingService = false;
+                    UpdateServiceStatusUI();
                 }
             });
         }
 
         public void OpenClicked(object sender, EventArgs e)
         {
-            var status = ServiceControllerHelper.GetServiceStatus();
-            if (status == ServiceControllerStatus.Running)
+            bool isInstalled = ServiceControllerHelper.IsServiceInstalled();
+
+            if (isInstalled)
             {
-                OpenBrowser();
+                var status = ServiceControllerHelper.GetServiceStatus();
+                if (status == ServiceControllerStatus.Running)
+                {
+                    OpenBrowser();
+                }
+                else
+                {
+                    if (MessageBox.Show("The Audiobookshelf Service is not currently running.\nDo you want to start it now?",
+                        "Audiobookshelf", MessageBoxButtons.YesNo, MessageBoxIcon.Question) == DialogResult.Yes)
+                    {
+                        _isOperatingService = true;
+                        _startServerMenuItem.Enabled = false;
+                        _stopServerMenuItem.Enabled = false;
+                        _restartServerMenuItem.Enabled = false;
+                        _trayIcon.Text = "Audiobookshelf - Starting Service...";
+
+                        Task.Run(() =>
+                        {
+                            try
+                            {
+                                if (ServiceControllerHelper.StartService())
+                                {
+                                    OpenBrowser();
+                                }
+                                else
+                                {
+                                    MessageBox.Show("Could not start Audiobookshelf Service. Please check the logs.", "Audiobookshelf", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                                }
+                            }
+                            finally
+                            {
+                                _isOperatingService = false;
+                                UpdateServiceStatusUI();
+                            }
+                        });
+                    }
+                }
             }
             else
             {
-                if (MessageBox.Show("The Audiobookshelf Service is not currently running.\nDo you want to start it now?",
-                    "Audiobookshelf", MessageBoxButtons.YesNo, MessageBoxIcon.Question) == DialogResult.Yes)
+                // Standalone process mode
+                bool isRunning = IsLocalServerProcessRunning();
+                if (isRunning)
                 {
-                    Task.Run(() =>
+                    OpenBrowser();
+                }
+                else
+                {
+                    if (MessageBox.Show("The Audiobookshelf Server is not currently running.\nDo you want to start it now?",
+                        "Audiobookshelf", MessageBoxButtons.YesNo, MessageBoxIcon.Question) == DialogResult.Yes)
                     {
-                        if (ServiceControllerHelper.StartService())
+                        _isOperatingService = true;
+                        _startServerMenuItem.Enabled = false;
+                        _stopServerMenuItem.Enabled = false;
+                        _restartServerMenuItem.Enabled = false;
+                        _trayIcon.Text = "Audiobookshelf - Starting Server...";
+
+                        Task.Run(() =>
                         {
-                            OpenBrowser();
-                        }
-                        else
-                        {
-                            MessageBox.Show("Could not start Audiobookshelf Service. Please check the logs.", "Audiobookshelf", MessageBoxButtons.OK, MessageBoxIcon.Error);
-                        }
-                    });
+                            try
+                            {
+                                if (_localServerMonitor == null)
+                                {
+                                    _localServerMonitor = new ServerMonitor();
+                                }
+                                _localServerMonitor.Start();
+
+                                for (int i = 0; i < 8; i++)
+                                {
+                                    if (IsLocalServerProcessRunning()) break;
+                                    System.Threading.Thread.Sleep(500);
+                                }
+
+                                if (IsLocalServerProcessRunning())
+                                {
+                                    OpenBrowser();
+                                }
+                                else
+                                {
+                                    MessageBox.Show("Could not start Audiobookshelf server process. Please check the logs.", "Audiobookshelf", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                                }
+                            }
+                            finally
+                            {
+                                _isOperatingService = false;
+                                UpdateServiceStatusUI();
+                            }
+                        });
+                    }
                 }
             }
         }
@@ -347,6 +655,19 @@ namespace AudiobookshelfTray
         {
             _logger.Debug("Tray application exiting...");
             _statusTimer.Stop();
+
+            // Stop standalone server process if running under tray
+            try
+            {
+                if (_localServerMonitor != null && _localServerMonitor.IsRunning)
+                {
+                    _localServerMonitor.Stop();
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.Debug($"Error stopping local server on tray exit: {ex.Message}");
+            }
 
             if (_runInstall)
             {
