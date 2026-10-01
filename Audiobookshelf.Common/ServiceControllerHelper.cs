@@ -1,6 +1,8 @@
 using System;
 using System.Diagnostics;
+using System.Security.Principal;
 using System.ServiceProcess;
+using Microsoft.Win32;
 using NLog;
 
 namespace Audiobookshelf.Common
@@ -8,7 +10,81 @@ namespace Audiobookshelf.Common
     public static class ServiceControllerHelper
     {
         public const string SERVICE_NAME = "AudiobookshelfService";
+        public const string SERVICE_BINARY = "AudiobookshelfService.exe";
+
         private static readonly Logger _logger = LogManager.GetCurrentClassLogger();
+
+        public static string GetUserSid(string username = null)
+        {
+            try
+            {
+                if (string.IsNullOrWhiteSpace(username))
+                {
+                    return WindowsIdentity.GetCurrent()?.User?.Value;
+                }
+
+                string accountName = username.Trim();
+                if (accountName.StartsWith(".\\", StringComparison.OrdinalIgnoreCase))
+                {
+                    accountName = accountName.Substring(2);
+                }
+
+                var account = new NTAccount(accountName);
+                var sid = (SecurityIdentifier)account.Translate(typeof(SecurityIdentifier));
+                return sid.Value;
+            }
+            catch (Exception ex)
+            {
+                _logger.Debug($"Could not resolve SID for user '{username}': {ex.Message}");
+                try
+                {
+                    return WindowsIdentity.GetCurrent()?.User?.Value;
+                }
+                catch { }
+                return null;
+            }
+        }
+
+        public static string GetServiceAccountName()
+        {
+            try
+            {
+                using (var key = Registry.LocalMachine.OpenSubKey($@"SYSTEM\CurrentControlSet\Services\{SERVICE_NAME}"))
+                {
+                    if (key != null)
+                    {
+                        var objName = key.GetValue("ObjectName") as string;
+                        if (!string.IsNullOrWhiteSpace(objName))
+                        {
+                            return objName;
+                        }
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.Debug($"Could not read service ObjectName from registry: {ex.Message}");
+            }
+            return null;
+        }
+
+        public static string BuildServiceDacl(string username = null)
+        {
+            if (string.IsNullOrWhiteSpace(username))
+            {
+                username = GetServiceAccountName();
+            }
+
+            string userSid = GetUserSid(username);
+            if (!string.IsNullOrWhiteSpace(userSid))
+            {
+                // Grant start/stop/control permissions ONLY to LocalSystem (SY), Administrators (BA), and this specific service user account
+                return $"D:(A;;CCLCSWRPWPDTLORC;;;SY)(A;;CCDCLCSWRPWPDTLOCRSDRCWDWO;;;BA)(A;;CCLCSWRPWPDTLORC;;;{userSid})";
+            }
+
+            // Fallback: Administrators & LocalSystem
+            return "D:(A;;CCLCSWRPWPDTLORC;;;SY)(A;;CCDCLCSWRPWPDTLOCRSDRCWDWO;;;BA)";
+        }
 
         public static bool IsServiceInstalled()
         {
@@ -105,8 +181,9 @@ namespace Audiobookshelf.Common
             }
             catch (Exception ex)
             {
-                _logger.Warn($"Standard StartService encountered exception: {ex.Message}. Attempting elevated fallback...");
-                if (RunElevatedCommand("net.exe", $"start {SERVICE_NAME}"))
+                _logger.Warn($"Standard StartService encountered exception: {ex.Message}. Attempting elevated fallback and applying DACL permissions for service user...");
+                string dacl = BuildServiceDacl();
+                if (RunElevatedCommand("cmd.exe", $"/c sc.exe sdset {SERVICE_NAME} \"{dacl}\" & net.exe start {SERVICE_NAME}"))
                 {
                     var sw = Stopwatch.StartNew();
                     while (sw.ElapsedMilliseconds < timeoutSeconds * 1000)
@@ -183,8 +260,9 @@ namespace Audiobookshelf.Common
             }
             catch (Exception ex)
             {
-                _logger.Warn($"Standard StopService encountered exception: {ex.Message}. Attempting elevated fallback...");
-                if (RunElevatedCommand("net.exe", $"stop {SERVICE_NAME}"))
+                _logger.Warn($"Standard StopService encountered exception: {ex.Message}. Attempting elevated fallback and applying DACL permissions for service user...");
+                string dacl = BuildServiceDacl();
+                if (RunElevatedCommand("cmd.exe", $"/c sc.exe sdset {SERVICE_NAME} \"{dacl}\" & net.exe stop {SERVICE_NAME}"))
                 {
                     var sw = Stopwatch.StartNew();
                     while (sw.ElapsedMilliseconds < timeoutSeconds * 1000)
@@ -246,8 +324,6 @@ namespace Audiobookshelf.Common
             _logger.Info($"Service {SERVICE_NAME} restarted successfully.");
             return true;
         }
-
-        public const string SERVICE_BINARY = "AudiobookshelfService.exe";
 
         public static string FindServiceBinary()
         {
@@ -312,7 +388,8 @@ namespace Audiobookshelf.Common
                 sb.AppendLine($"sc.exe create {SERVICE_NAME} binPath= \"{serviceExePath}\" start= auto DisplayName= \"Audiobookshelf Service\"");
                 sb.AppendLine($"sc.exe description {SERVICE_NAME} \"Audiobookshelf Background Server and Network Drive Supervisor\"");
                 sb.AppendLine($"sc.exe config {SERVICE_NAME} obj= \"{safeUser}\" password= \"{safePass}\"");
-                sb.AppendLine($"sc.exe sdset {SERVICE_NAME} \"D:(A;;CCLCSWRPWPDTLORC;;;SY)(A;;CCDCLCSWRPWPDTLOCRSDRCWDWO;;;BA)(A;;CCLCSWRPWPDTLORC;;;IU)(A;;CCLCSWRPWPDTLORC;;;AU)(A;;CCLCSWRPWPDTLORC;;;PU)S:(AU;FA;CCDCLCSWRPWPDTLOCRSDRCWDWO;;;WD)\"");
+                string dacl = BuildServiceDacl(username);
+                sb.AppendLine($"sc.exe sdset {SERVICE_NAME} \"{dacl}\"");
                 sb.AppendLine($"net.exe start {SERVICE_NAME}");
                 sb.AppendLine("exit /b %ERRORLEVEL%");
 

@@ -61,8 +61,8 @@ Filename: "{sys}\sc.exe"; Parameters: "create {#ServiceName} binPath= ""{app}\{#
 Filename: "{sys}\sc.exe"; Parameters: "description {#ServiceName} ""Audiobookshelf Background Server and Network Drive Supervisor"""; Flags: runhidden; Check: ShouldInstallService
 ; 3. Configure service user account if provided
 Filename: "{sys}\sc.exe"; Parameters: "config {#ServiceName} obj= ""{code:GetServiceUsername}"" password= ""{code:GetServicePassword}"""; Flags: runhidden; Check: HasUserCredentials
-; 4. Grant start/stop/control service permissions to interactive and authenticated users
-Filename: "{sys}\sc.exe"; Parameters: "sdset {#ServiceName} ""D:(A;;CCLCSWRPWPDTLORC;;;SY)(A;;CCDCLCSWRPWPDTLOCRSDRCWDWO;;;BA)(A;;CCLCSWRPWPDTLORC;;;IU)(A;;CCLCSWRPWPDTLORC;;;AU)(A;;CCLCSWRPWPDTLORC;;;PU)S:(AU;FA;CCDCLCSWRPWPDTLOCRSDRCWDWO;;;WD)"""; Flags: runhidden; Check: ShouldInstallService
+; 4. Grant start/stop/control service permissions ONLY to the configured service user account (and SY/BA)
+Filename: "{sys}\sc.exe"; Parameters: "sdset {#ServiceName} ""{code:GetServiceDacl}"""; Flags: runhidden; Check: ShouldInstallService
 ; 5. Start the service
 Filename: "{sys}\net.exe"; Parameters: "start {#ServiceName}"; Flags: runhidden; Check: ShouldInstallService
 ; 6. Launch Tray application
@@ -359,4 +359,51 @@ end;
 function HasUserCredentials(): Boolean;
 begin
   Result := ShouldInstallService() and (Length(Trim(UserEdit.Text)) > 0);
+end;
+
+function GetServiceUserSid(Param: String): String;
+var
+  FullUser: String;
+  TempFile: String;
+  ResultCode: Integer;
+  Lines: TArrayOfString;
+begin
+  Result := '';
+  FullUser := Trim(UserEdit.Text);
+  if Pos('.\', FullUser) = 1 then
+  begin
+    FullUser := Copy(FullUser, 3, Length(FullUser));
+  end;
+
+  TempFile := ExpandConstant('{tmp}\abs_sid.txt');
+  if FileExists(TempFile) then DeleteFile(TempFile);
+
+  Exec('powershell.exe', 
+       '-NoProfile -NonInteractive -ExecutionPolicy Bypass -Command ' +
+       '"try { $u = ''' + FullUser + '''; $s = (New-Object System.Security.Principal.NTAccount($u)).Translate([System.Security.Principal.SecurityIdentifier]).Value; Set-Content -Path ''' + TempFile + ''' -Value $s } catch { }"',
+       '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+
+  if FileExists(TempFile) then
+  begin
+    if LoadStringsFromFile(TempFile, Lines) and (GetArrayLength(Lines) > 0) then
+    begin
+      Result := Trim(Lines[0]);
+    end;
+    DeleteFile(TempFile);
+  end;
+end;
+
+function GetServiceDacl(Param: String): String;
+var
+  Sid: String;
+begin
+  Sid := GetServiceUserSid('');
+  if Length(Sid) > 0 then
+  begin
+    Result := 'D:(A;;CCLCSWRPWPDTLORC;;;SY)(A;;CCDCLCSWRPWPDTLOCRSDRCWDWO;;;BA)(A;;CCLCSWRPWPDTLORC;;;' + Sid + ')';
+  end
+  else
+  begin
+    Result := 'D:(A;;CCLCSWRPWPDTLORC;;;SY)(A;;CCDCLCSWRPWPDTLOCRSDRCWDWO;;;BA)';
+  end;
 end;
