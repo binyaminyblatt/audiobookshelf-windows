@@ -1,6 +1,8 @@
 name: Build Windows installer on Release of audiobookshelf
 
 on:
+  push:
+    branches: [ master ]
   schedule:
     # Check for new upstream audiobookshelf releases every 4 hours
     - cron: '0 */4 * * *'

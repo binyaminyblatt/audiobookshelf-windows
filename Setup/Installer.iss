@@ -34,8 +34,8 @@ SetupIconFile=..\AudiobookshelfTray\Resources\AppIcon.ico
 Compression=lzma
 SolidCompression=yes
 WizardStyle=modern
-ArchitecturesAllowed=x64
-ArchitecturesInstallIn64BitMode=x64
+ArchitecturesAllowed=x64compatible
+ArchitecturesInstallIn64BitMode=x64compatible
 UninstallDisplayIcon={app}\{#MyAppExeName}
 
 [Languages]
@@ -48,6 +48,7 @@ Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{
 Source: "{#MyAppBinDir}\{#MyAppExeName}"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#MyAppBinDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "{#ServiceBinDir}\{#ServiceExeName}"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#ServiceBinDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "{#ServerBinDir}\{#ServerExeName}"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]
@@ -63,12 +64,15 @@ Filename: "{sys}\sc.exe"; Parameters: "description {#ServiceName} ""Audiobookshe
 Filename: "{sys}\sc.exe"; Parameters: "config {#ServiceName} obj= ""{code:GetServiceUsername}"" password= ""{code:GetServicePassword}"""; Flags: runhidden; Check: HasUserCredentials
 ; 4. Grant start/stop/control service permissions ONLY to the configured service user account (and SY/BA)
 Filename: "{sys}\sc.exe"; Parameters: "sdset {#ServiceName} ""{code:GetServiceDacl}"""; Flags: runhidden; Check: ShouldInstallService
-; 5. Start the service
+; 5. Add Windows Firewall Inbound Rule
+Filename: "{sys}\netsh.exe"; Parameters: "advfirewall firewall add rule name=""{#MyAppName} Server"" dir=in action=allow protocol=TCP localport={code:GetServerPort} profile=any description=""Allow inbound connections for Audiobookshelf Server"""; Flags: runhidden; Check: ShouldConfigureFirewall
+; 6. Start the service
 Filename: "{sys}\net.exe"; Parameters: "start {#ServiceName}"; Flags: runhidden; Check: ShouldInstallService
-; 6. Launch Tray application
+; 7. Launch Tray application
 Filename: "{app}\{#MyAppExeName}"; Description: "{cm:LaunchProgram,{#StringChange(MyAppName, '&', '&&')}}"; Flags: nowait postinstall
 
 [UninstallRun]
+Filename: "{sys}\netsh.exe"; Parameters: "advfirewall firewall delete rule name=""{#MyAppName} Server"""; Flags: runhidden; RunOnceId: "DeleteFirewallRule"
 Filename: "{sys}\sc.exe"; Parameters: "stop {#ServiceName}"; Flags: runhidden; RunOnceId: "StopService"
 Filename: "{sys}\taskkill.exe"; Parameters: "/F /IM {#ServiceExeName} /IM {#ServerExeName} /IM {#MyAppExeName}"; Flags: runhidden; RunOnceId: "KillProcesses"
 Filename: "{sys}\sc.exe"; Parameters: "delete {#ServiceName}"; Flags: runhidden; RunOnceId: "DeleteService"
@@ -81,6 +85,8 @@ Type: files; Name: "{app}\*.log"
 Root: HKLM; Subkey: "Software\{#MyAppName}"; ValueType: string; ValueName: "DataDir"; ValueData: "{code:GetDataDir}"; Flags: uninsdeletevalue
 Root: HKLM; Subkey: "Software\{#MyAppName}"; ValueType: string; ValueName: "InstallDir"; ValueData: "{app}"; Flags: uninsdeletevalue
 Root: HKLM; Subkey: "Software\{#MyAppName}"; ValueType: string; ValueName: "AppVersion"; ValueData: "{#MyAppVersion}"; Flags: uninsdeletevalue
+Root: HKLM; Subkey: "Software\{#MyAppName}"; ValueType: string; ValueName: "ServerPort"; ValueData: "{code:GetServerPort}"; Flags: uninsdeletevalue
+Root: HKLM; Subkey: "Software\{#MyAppName}"; ValueType: string; ValueName: "ServerHost"; ValueData: "{code:GetServerHost}"; Flags: uninsdeletevalue
 
 [Code]
 // Win32 Authentication APIs
@@ -106,6 +112,168 @@ var
 
 const
   WM_CLOSE = $0010;
+
+function HasCmdSwitch(SwitchName: String): Boolean;
+var
+  i: Integer;
+  Arg: String;
+  Target: String;
+begin
+  Result := False;
+  Target := UpperCase(SwitchName);
+  for i := 1 to ParamCount do
+  begin
+    Arg := UpperCase(ParamStr(i));
+    if (Arg = '/' + Target) or (Arg = '-' + Target) or (Arg = '--' + Target) then
+    begin
+      Result := True;
+      Exit;
+    end;
+  end;
+end;
+
+function GetCmdParamValue(ParamName, DefaultVal: String): String;
+var
+  Val: String;
+begin
+  Val := ExpandConstant('{param:' + ParamName + '|' + DefaultVal + '}');
+  Result := Val;
+end;
+
+function GetServerPort(Param: String): String;
+var
+  PortVal: String;
+begin
+  PortVal := GetCmdParamValue('PORT', '');
+  if Length(PortVal) = 0 then
+  begin
+    if not RegQueryStringValue(HKLM, 'Software\{#MyAppName}', 'ServerPort', PortVal) then
+    begin
+      PortVal := '13378';
+    end;
+  end;
+  Result := Trim(PortVal);
+end;
+
+function GetServerHost(Param: String): String;
+var
+  HostVal: String;
+begin
+  HostVal := GetCmdParamValue('HOST', '');
+  if Length(HostVal) = 0 then
+  begin
+    if not RegQueryStringValue(HKLM, 'Software\{#MyAppName}', 'ServerHost', HostVal) then
+    begin
+      HostVal := '0.0.0.0';
+    end;
+  end;
+  Result := Trim(HostVal);
+end;
+
+function ShouldConfigureFirewall(): Boolean;
+var
+  FwVal: String;
+begin
+  if HasCmdSwitch('NOFIREWALL') then
+  begin
+    Result := False;
+    Exit;
+  end;
+
+  FwVal := UpperCase(GetCmdParamValue('FIREWALL', '1'));
+  if (FwVal = '0') or (FwVal = 'NO') or (FwVal = 'FALSE') then
+  begin
+    Result := False;
+    Exit;
+  end;
+
+  Result := True;
+end;
+
+function ShouldInstallService(): Boolean;
+var
+  ParamVal: String;
+begin
+  if HasCmdSwitch('NOSERVICE') then
+  begin
+    Result := False;
+    Exit;
+  end;
+
+  ParamVal := UpperCase(GetCmdParamValue('INSTALLSERVICE', ''));
+  if (ParamVal = '0') or (ParamVal = 'NO') or (ParamVal = 'FALSE') then
+  begin
+    Result := False;
+    Exit;
+  end;
+  if (ParamVal = '1') or (ParamVal = 'YES') or (ParamVal = 'TRUE') then
+  begin
+    Result := True;
+    Exit;
+  end;
+
+  if InstallServiceCheck <> nil then
+  begin
+    Result := InstallServiceCheck.Checked;
+  end
+  else
+  begin
+    Result := True;
+  end;
+end;
+
+function GetDataDir(Param: String): String;
+var
+  CliDataDir: String;
+begin
+  CliDataDir := GetCmdParamValue('DATADIR', '');
+  if Length(CliDataDir) > 0 then
+  begin
+    Result := CliDataDir;
+    Exit;
+  end;
+
+  if (DataDirPage <> nil) and (Length(DataDirPage.Values[0]) > 0) then
+  begin
+    Result := DataDirPage.Values[0];
+  end
+  else
+  begin
+    Result := ExpandConstant('{commonappdata}\{#MyAppName}');
+  end;
+end;
+
+function GetServiceUsername(Param: String): String;
+var
+  UserVal: String;
+begin
+  UserVal := GetCmdParamValue('SERVICE_USER', '');
+  if Length(UserVal) = 0 then UserVal := GetCmdParamValue('USER', '');
+  if (Length(UserVal) = 0) and (UserEdit <> nil) then
+  begin
+    UserVal := UserEdit.Text;
+  end;
+  Result := Trim(UserVal);
+end;
+
+function GetServicePassword(Param: String): String;
+var
+  PassVal: String;
+begin
+  PassVal := GetCmdParamValue('SERVICE_PASS', '');
+  if Length(PassVal) = 0 then PassVal := GetCmdParamValue('PASSWORD', '');
+  if Length(PassVal) = 0 then PassVal := GetCmdParamValue('PASS', '');
+  if (Length(PassVal) = 0) and (PassEdit <> nil) then
+  begin
+    PassVal := PassEdit.Text;
+  end;
+  Result := PassVal;
+end;
+
+function HasUserCredentials(): Boolean;
+begin
+  Result := ShouldInstallService() and (Length(GetServiceUsername('')) > 0);
+end;
 
 function IsRunningInstanceClosed(): Boolean;
 var
@@ -150,7 +318,8 @@ function InitializeUninstall(): Boolean;
 var
   ResultCode: Integer;
 begin
-  // Stop running service and terminate processes to prevent locked file errors during uninstall
+  // Remove firewall rule, stop running service, and terminate processes to prevent locked file errors during uninstall
+  Exec(ExpandConstant('{sys}\netsh.exe'), 'advfirewall firewall delete rule name="{#MyAppName} Server"', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
   Exec(ExpandConstant('{sys}\sc.exe'), 'stop {#ServiceName}', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
   Exec(ExpandConstant('{sys}\taskkill.exe'), '/F /IM {#ServiceExeName}', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
   Exec(ExpandConstant('{sys}\taskkill.exe'), '/F /IM {#ServerExeName}', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
@@ -166,14 +335,17 @@ var
 begin
   if CurUninstallStep = usUninstall then
   begin
-    // 1. Stop service and terminate any remaining processes
+    // 1. Remove Windows Firewall rule
+    Exec(ExpandConstant('{sys}\netsh.exe'), 'advfirewall firewall delete rule name="{#MyAppName} Server"', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+
+    // 2. Stop service and terminate any remaining processes
     Exec(ExpandConstant('{sys}\sc.exe'), 'stop {#ServiceName}', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
     Exec(ExpandConstant('{sys}\taskkill.exe'), '/F /IM {#ServiceExeName}', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
     Exec(ExpandConstant('{sys}\taskkill.exe'), '/F /IM {#ServerExeName}', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
     Exec(ExpandConstant('{sys}\taskkill.exe'), '/F /IM {#MyAppExeName}', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
     Sleep(500);
 
-    // 2. Delete the Windows Service from Service Control Manager
+    // 3. Delete the Windows Service from Service Control Manager
     Exec(ExpandConstant('{sys}\sc.exe'), 'delete {#ServiceName}', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
     Sleep(500);
   end;
@@ -191,6 +363,7 @@ end;
 procedure InitializeWizard;
 var
   DataDir: String;
+  CliUser, CliPass, CliDataDir: String;
 begin
   // 1. Data Directory Page
   DataDirPage := CreateInputDirPage(
@@ -203,7 +376,13 @@ begin
   );
   DataDirPage.Add('');
   DataDirPage.Values[0] := ExpandConstant('{commonappdata}\Audiobookshelf');
-  if RegQueryStringValue(HKLM, 'Software\Audiobookshelf', 'DataDir', DataDir) then
+
+  CliDataDir := GetCmdParamValue('DATADIR', '');
+  if Length(CliDataDir) > 0 then
+  begin
+    DataDirPage.Values[0] := CliDataDir;
+  end
+  else if RegQueryStringValue(HKLM, 'Software\Audiobookshelf', 'DataDir', DataDir) then
   begin
     DataDirPage.Values[0] := DataDir;
   end;
@@ -223,7 +402,7 @@ begin
   InstallServiceCheck.Top := ScaleY(5);
   InstallServiceCheck.Width := ServicePage.SurfaceWidth;
   InstallServiceCheck.Font.Style := [fsBold];
-  InstallServiceCheck.Checked := True;
+  InstallServiceCheck.Checked := ShouldInstallService();
   InstallServiceCheck.OnClick := @InstallServiceCheckClick;
 
   NoteLabel := TLabel.Create(ServicePage);
@@ -245,7 +424,13 @@ begin
   UserEdit.Left := ScaleX(0);
   UserEdit.Top := ScaleY(100);
   UserEdit.Width := ScaleX(320);
-  UserEdit.Text := '.\' + GetUserNameString;
+
+  CliUser := GetCmdParamValue('SERVICE_USER', '');
+  if Length(CliUser) = 0 then CliUser := GetCmdParamValue('USER', '');
+  if Length(CliUser) > 0 then
+    UserEdit.Text := CliUser
+  else
+    UserEdit.Text := '.\' + GetUserNameString;
 
   PassLabel := TLabel.Create(ServicePage);
   PassLabel.Parent := ServicePage.Surface;
@@ -259,11 +444,14 @@ begin
   PassEdit.Left := ScaleX(0);
   PassEdit.Top := ScaleY(155);
   PassEdit.Width := ScaleX(320);
-end;
 
-function ShouldInstallService(): Boolean;
-begin
-  Result := (InstallServiceCheck <> nil) and InstallServiceCheck.Checked;
+  CliPass := GetCmdParamValue('SERVICE_PASS', '');
+  if Length(CliPass) = 0 then CliPass := GetCmdParamValue('PASSWORD', '');
+  if Length(CliPass) = 0 then CliPass := GetCmdParamValue('PASS', '');
+  if Length(CliPass) > 0 then
+    PassEdit.Text := CliPass;
+
+  InstallServiceCheckClick(nil);
 end;
 
 function NextButtonClick(CurPageID: Integer): Boolean;
@@ -341,26 +529,6 @@ begin
   end;
 end;
 
-function GetDataDir(Param: String): String;
-begin
-  Result := DataDirPage.Values[0];
-end;
-
-function GetServiceUsername(Param: String): String;
-begin
-  Result := Trim(UserEdit.Text);
-end;
-
-function GetServicePassword(Param: String): String;
-begin
-  Result := PassEdit.Text;
-end;
-
-function HasUserCredentials(): Boolean;
-begin
-  Result := ShouldInstallService() and (Length(Trim(UserEdit.Text)) > 0);
-end;
-
 function GetServiceUserSid(Param: String): String;
 var
   FullUser: String;
@@ -369,7 +537,7 @@ var
   Lines: TArrayOfString;
 begin
   Result := '';
-  FullUser := Trim(UserEdit.Text);
+  FullUser := GetServiceUsername('');
   if Pos('.\', FullUser) = 1 then
   begin
     FullUser := Copy(FullUser, 3, Length(FullUser));
@@ -405,5 +573,41 @@ begin
   else
   begin
     Result := 'D:(A;;CCLCSWRPWPDTLORC;;;SY)(A;;CCDCLCSWRPWPDTLOCRSDRCWDWO;;;BA)';
+  end;
+end;
+
+procedure CurStepChanged(CurStep: TSetupStep);
+var
+  DataDir, EscapedDataDir, ConfigPath, Port, Host: String;
+  Lines: TArrayOfString;
+begin
+  if CurStep = ssPostInstall then
+  begin
+    DataDir := GetDataDir('');
+    if not DirExists(DataDir) then
+    begin
+      ForceDirectories(DataDir);
+    end;
+
+    Port := GetServerPort('');
+    Host := GetServerHost('');
+    ConfigPath := ExpandConstant('{commonappdata}\{#MyAppName}\config.json');
+
+    // If config.json doesn't exist yet, generate initial config with selected settings
+    if not FileExists(ConfigPath) then
+    begin
+      ForceDirectories(ExtractFileDir(ConfigPath));
+      EscapedDataDir := DataDir;
+      StringChange(EscapedDataDir, '\', '\\');
+
+      SetArrayLength(Lines, 6);
+      Lines[0] := '{';
+      Lines[1] := '  "ServerPort": "' + Port + '",';
+      Lines[2] := '  "ServerHost": "' + Host + '",';
+      Lines[3] := '  "DataDir": "' + EscapedDataDir + '",';
+      Lines[4] := '  "AppVersion": "{#MyAppVersion}"';
+      Lines[5] := '}';
+      SaveStringsToFile(ConfigPath, Lines, False);
+    end;
   end;
 end;

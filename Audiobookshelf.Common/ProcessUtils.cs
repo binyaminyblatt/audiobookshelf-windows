@@ -39,39 +39,46 @@ namespace Audiobookshelf.Common
         /// </summary>
         public static void StopProcess(Process process)
         {
-            if (process == null)
-            {
-                return;
-            }
+            if (process == null) return;
 
             try
             {
-                if (process.HasExited)
-                {
-                    return;
-                }
+                if (process.HasExited) return;
 
                 int pid = process.Id;
+                _logger.Info($"Initiating graceful shutdown for process {pid} ({process.ProcessName})...");
 
+                // 1. If standard input is redirected, close standard input to trigger EOF
+                try
+                {
+                    if (process.StartInfo.RedirectStandardInput && !process.HasExited)
+                    {
+                        process.StandardInput.Close();
+                    }
+                }
+                catch { }
+
+                // 2. Attempt to attach console and send CTRL_C_EVENT or CTRL_BREAK_EVENT
                 try
                 {
                     if (AttachConsole((uint)pid))
                     {
                         SetConsoleCtrlHandler(null, true);
-                        bool ctrlCSent = GenerateConsoleCtrlEvent(CtrlTypes.CTRL_C_EVENT, 0);
-                        if (ctrlCSent)
+                        bool sent = GenerateConsoleCtrlEvent(CtrlTypes.CTRL_C_EVENT, 0);
+                        if (!sent)
                         {
-                            _logger.Debug($"Sent Ctrl+C to process {pid}. Waiting for it to exit...");
-                            try
+                            sent = GenerateConsoleCtrlEvent(CtrlTypes.CTRL_BREAK_EVENT, 0);
+                        }
+
+                        if (sent)
+                        {
+                            _logger.Debug($"Sent console break signal to process {pid}. Waiting up to 5 seconds for database flush...");
+                            if (process.WaitForExit(5000))
                             {
-                                if (!process.WaitForExit(4000))
-                                {
-                                    _logger.Warn($"Process {pid} did not exit within 4 seconds of Ctrl+C");
-                                }
-                            }
-                            catch (Exception e)
-                            {
-                                _logger.Error($"Exception thrown by Process.WaitForExit: {e}");
+                                _logger.Info($"Process {pid} exited gracefully.");
+                                SetConsoleCtrlHandler(null, false);
+                                FreeConsole();
+                                return;
                             }
                         }
                         SetConsoleCtrlHandler(null, false);
@@ -80,20 +87,37 @@ namespace Audiobookshelf.Common
                 }
                 catch (Exception ex)
                 {
-                    _logger.Debug($"AttachConsole/Ctrl+C attempt error on PID {pid}: {ex.Message}");
+                    _logger.Debug($"Console break signal exception on PID {pid}: {ex.Message}");
                 }
 
+                // 3. Try CloseMainWindow if process has a UI or message pump
+                try
+                {
+                    if (!process.HasExited)
+                    {
+                        process.CloseMainWindow();
+                        if (process.WaitForExit(1000))
+                        {
+                            _logger.Info($"Process {pid} exited following CloseMainWindow.");
+                            return;
+                        }
+                    }
+                }
+                catch { }
+
+                // 4. Force kill if process failed to exit gracefully
                 if (!process.HasExited)
                 {
-                    _logger.Info($"Terminating process {pid} via Kill...");
+                    _logger.Warn($"Process {pid} did not exit gracefully within timeout. Forcing termination via Kill()...");
                     try
                     {
                         process.Kill();
                         process.WaitForExit(3000);
+                        _logger.Info($"Process {pid} terminated via Kill().");
                     }
                     catch (Exception e)
                     {
-                        _logger.Error($"Exception thrown by Process.Kill: {e}");
+                        _logger.Error($"Exception during Process.Kill for PID {pid}: {e}");
                     }
                 }
             }

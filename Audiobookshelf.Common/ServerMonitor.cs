@@ -20,6 +20,44 @@ namespace Audiobookshelf.Common
         private CancellationTokenSource _watchdogCts;
         private UpdateManager _updateManager;
 
+        static ServerMonitor()
+        {
+            EnsureNLogConfiguration();
+        }
+
+        public static void EnsureNLogConfiguration()
+        {
+            try
+            {
+                var config = LogManager.Configuration ?? new NLog.Config.LoggingConfiguration();
+                bool hasServerTarget = config.FindTargetByName("serverlogfile") != null;
+
+                if (!hasServerTarget)
+                {
+                    string logsDir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "Audiobookshelf", "logs");
+                    if (!Directory.Exists(logsDir)) Directory.CreateDirectory(logsDir);
+
+                    string serverLogPath = Path.Combine(logsDir, "server.log");
+                    var serverTarget = new NLog.Targets.FileTarget("serverlogfile")
+                    {
+                        FileName = serverLogPath,
+                        Layout = "${message}",
+                        MaxArchiveFiles = 5,
+                        ArchiveAboveSize = 10485760,
+                        ArchiveNumbering = NLog.Targets.ArchiveNumberingMode.Rolling,
+                        KeepFileOpen = false
+                    };
+
+                    config.AddTarget("serverlogfile", serverTarget);
+                    config.AddRule(LogLevel.Trace, LogLevel.Fatal, serverTarget, "Server", final: true);
+
+                    LogManager.Configuration = config;
+                    LogManager.ReconfigExistingLoggers();
+                }
+            }
+            catch { }
+        }
+
         public bool IsRunning => _serverProcess != null && !_serverProcess.HasExited;
 
         public static string FindServerBinary()
@@ -205,7 +243,8 @@ namespace Audiobookshelf.Common
                 Directory.CreateDirectory(logsPath);
 
                 string port = string.IsNullOrWhiteSpace(settings.ServerPort) ? "13378" : settings.ServerPort;
-                string arguments = $"-p {port} --config \"{configPath}\" --metadata \"{metadataPath}\" --source windows";
+                string host = string.IsNullOrWhiteSpace(settings.ServerHost) ? "0.0.0.0" : settings.ServerHost;
+                string arguments = $"-p {port} -h {host} --config \"{configPath}\" --metadata \"{metadataPath}\" --source windows";
 
                 // Terminate any leftover orphaned audiobookshelf processes
                 try
@@ -231,7 +270,7 @@ namespace Audiobookshelf.Common
                     _logger.Debug($"Error scanning for orphaned processes: {ex.Message}");
                 }
 
-                _logger.Info($"Launching {SERVER_BINARY} with arguments: {arguments}");
+                _logger.Info($"Launching {SERVER_BINARY} on {host}:{port} with arguments: {arguments}");
 
                 var startInfo = new ProcessStartInfo
                 {
@@ -245,6 +284,9 @@ namespace Audiobookshelf.Common
                     RedirectStandardInput = true,
                     WindowStyle = ProcessWindowStyle.Hidden
                 };
+
+                startInfo.EnvironmentVariables["HOST"] = host;
+                startInfo.EnvironmentVariables["PORT"] = port;
 
                 // Inject custom environment variables from settings.json ("envs")
                 if (settings.Envs != null && settings.Envs.Count > 0)

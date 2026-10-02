@@ -188,7 +188,7 @@ namespace Audiobookshelf.Common
 
                 _logger.Info($"GitHub latest release tag: {latestTag}, Current configured version: {currentVersion}");
 
-                if (!string.IsNullOrEmpty(latestTag) && latestTag != currentVersion)
+                if (!string.IsNullOrEmpty(latestTag) && SettingsHandler.IsNewerVersion(latestTag, currentVersion))
                 {
                     var assets = releaseObj["assets"] as JArray;
                     // Find audiobookshelf.exe asset in release

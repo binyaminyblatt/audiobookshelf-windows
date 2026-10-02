@@ -23,6 +23,12 @@ namespace AudiobookshelfTray
         private Panel _drivesBanner = null;
         private Panel _updatesBanner = null;
 
+        private Label labelHost;
+        private ComboBox comboBoxHost;
+        private CheckBox checkBoxOpenBrowser;
+        private CheckBox checkBoxManageFirewall;
+        private Button buttonBackupNow;
+
         public SettingsDialog(AppTray app)
         {
             InitializeComponent();
@@ -33,6 +39,83 @@ namespace AudiobookshelfTray
             // Populate Server Tab
             textBoxPort.Text = _originalSettings.ServerPort;
             textBoxDataFolder.Text = _originalSettings.DataDir;
+
+            // Host Binding
+            labelHost = new Label
+            {
+                Text = "Host / Network Interface Binding:",
+                Location = new Point(15, 180),
+                AutoSize = true
+            };
+
+            comboBoxHost = new ComboBox
+            {
+                Location = new Point(15, 204),
+                Size = new Size(380, 24),
+                DropDownWidth = 440,
+                DropDownStyle = ComboBoxStyle.DropDown
+            };
+            comboBoxHost.Items.Add("0.0.0.0 (All network interfaces - LAN access)");
+            comboBoxHost.Items.Add("127.0.0.1 (Localhost only)");
+
+            // Enumerate active network interface IPv4 addresses for multi-IP machines
+            var localIps = NetworkUtils.GetLocalIPv4Addresses();
+            foreach (var ip in localIps)
+            {
+                comboBoxHost.Items.Add($"{ip.IPAddress} ({ip.InterfaceName})");
+            }
+
+            string currentHost = string.IsNullOrWhiteSpace(_originalSettings.ServerHost) ? "0.0.0.0" : _originalSettings.ServerHost.Trim();
+            int matchIndex = -1;
+            for (int i = 0; i < comboBoxHost.Items.Count; i++)
+            {
+                string itemText = comboBoxHost.Items[i].ToString();
+                if (itemText.StartsWith(currentHost + " ") || itemText.Equals(currentHost, StringComparison.OrdinalIgnoreCase))
+                {
+                    matchIndex = i;
+                    break;
+                }
+            }
+
+            if (matchIndex >= 0)
+            {
+                comboBoxHost.SelectedIndex = matchIndex;
+            }
+            else if (currentHost == "0.0.0.0")
+            {
+                comboBoxHost.SelectedIndex = 0;
+            }
+            else if (currentHost == "127.0.0.1")
+            {
+                comboBoxHost.SelectedIndex = 1;
+            }
+            else
+            {
+                comboBoxHost.Text = currentHost;
+            }
+
+            // Open browser on startup checkbox
+            checkBoxOpenBrowser = new CheckBox
+            {
+                Text = "Open Audiobookshelf web client in default browser on launch",
+                Location = new Point(15, 246),
+                AutoSize = true,
+                Checked = _originalSettings.OpenBrowserOnStartup
+            };
+
+            // Windows Firewall rule management checkbox
+            checkBoxManageFirewall = new CheckBox
+            {
+                Text = "Configure Windows Defender Firewall inbound rule for server port",
+                Location = new Point(15, 276),
+                AutoSize = true,
+                Checked = true
+            };
+
+            groupBoxServer.Controls.Add(labelHost);
+            groupBoxServer.Controls.Add(comboBoxHost);
+            groupBoxServer.Controls.Add(checkBoxOpenBrowser);
+            groupBoxServer.Controls.Add(checkBoxManageFirewall);
 
             // Populate Drives Tab
             if (_originalSettings.DriveMaps != null)
@@ -55,6 +138,17 @@ namespace AudiobookshelfTray
             checkBoxGitHubUpdates.Checked = _originalSettings.AutoUpdateFromGitHub;
             checkBoxFolderUpdates.Checked = _originalSettings.AutoApplyFolderUpdates;
             textBoxUpdatesFolder.Text = Settings.GetDefaultUpdatesDir();
+
+            // Backup Database Now Button in Updates Tab
+            buttonBackupNow = new Button
+            {
+                Text = "Backup Database Now",
+                Location = new Point(buttonTestApiKey.Right + 12, buttonTestApiKey.Top),
+                Size = new Size(160, buttonTestApiKey.Height),
+                UseVisualStyleBackColor = true
+            };
+            buttonBackupNow.Click += ButtonBackupNow_Click;
+            groupBoxApiKey.Controls.Add(buttonBackupNow);
 
             // If Windows Service is not installed, disable Drive Mappings and Updates tabs and show Install Service button
             bool isServiceInstalled = ServiceControllerHelper.IsServiceInstalled();
@@ -342,6 +436,63 @@ namespace AudiobookshelfTray
             }
         }
 
+        private string GetSelectedHost()
+        {
+            if (comboBoxHost == null) return "0.0.0.0";
+            string text = comboBoxHost.Text.Trim();
+            if (text.StartsWith("0.0.0.0")) return "0.0.0.0";
+            if (text.StartsWith("127.0.0.1")) return "127.0.0.1";
+
+            // If an item like "192.168.1.50 (Ethernet)" was selected, extract the IP address
+            int spaceIndex = text.IndexOf(' ');
+            if (spaceIndex > 0)
+            {
+                string candidate = text.Substring(0, spaceIndex).Trim();
+                if (IPAddress.TryParse(candidate, out _))
+                {
+                    return candidate;
+                }
+            }
+
+            if (IPAddress.TryParse(text, out _))
+            {
+                return text;
+            }
+
+            return string.IsNullOrWhiteSpace(text) ? "0.0.0.0" : text;
+        }
+
+        private async void ButtonBackupNow_Click(object sender, EventArgs e)
+        {
+            string apiKey = textBoxApiKey.Text.Trim();
+            if (string.IsNullOrEmpty(apiKey))
+            {
+                MessageBox.Show(
+                    "Please enter an Admin API Key before triggering a database backup.\n\nYou can generate an API key in the Audiobookshelf Web UI (Settings -> Users -> API Keys).",
+                    "Admin API Key Required",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Warning
+                );
+                textBoxApiKey.Focus();
+                return;
+            }
+
+            buttonBackupNow.Enabled = false;
+            Cursor = Cursors.WaitCursor;
+
+            var (success, message) = await ServerHealthHelper.TriggerBackupAsync(textBoxPort.Text.Trim(), apiKey);
+
+            Cursor = Cursors.Default;
+            buttonBackupNow.Enabled = true;
+
+            MessageBox.Show(
+                message,
+                "Audiobookshelf Database Backup",
+                MessageBoxButtons.OK,
+                success ? MessageBoxIcon.Information : MessageBoxIcon.Warning
+            );
+        }
+
         private void SaveClicked(object sender, EventArgs e)
         {
             if (!ValidatePort() || !ValidateDataFolder())
@@ -366,7 +517,14 @@ namespace AudiobookshelfTray
 
             var newSettings = SettingsHandler.Load();
             newSettings.ServerPort = textBoxPort.Text.Trim();
+            newSettings.ServerHost = GetSelectedHost();
+            newSettings.OpenBrowserOnStartup = checkBoxOpenBrowser?.Checked ?? false;
             newSettings.DataDir = textBoxDataFolder.Text.Trim();
+
+            if (checkBoxManageFirewall != null && checkBoxManageFirewall.Checked)
+            {
+                Task.Run(() => FirewallHelper.AddOrUpdateFirewallRule(newSettings.ServerPort));
+            }
 
             if (isServiceInstalled)
             {

@@ -12,6 +12,12 @@ namespace Audiobookshelf.Common
         public string ServerPort { get; set; } = "13378";
 
         [JsonProperty]
+        public string ServerHost { get; set; } = "0.0.0.0";
+
+        [JsonProperty]
+        public bool OpenBrowserOnStartup { get; set; } = false;
+
+        [JsonProperty]
         public string DataDir { get; set; } = string.Empty;
 
         [JsonProperty]

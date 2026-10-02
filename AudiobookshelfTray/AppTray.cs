@@ -4,6 +4,7 @@ using System.Diagnostics;
 using System.Drawing;
 using System.IO;
 using System.Linq;
+using System.Runtime.InteropServices;
 using System.ServiceProcess;
 using System.Threading.Tasks;
 using System.Windows.Forms;
@@ -17,6 +18,9 @@ namespace AudiobookshelfTray
 {
     public class AppTray : ApplicationContext
     {
+        [DllImport("user32.dll", CharSet = CharSet.Auto)]
+        private static extern bool DestroyIcon(IntPtr handle);
+
         private readonly Logger _logger = LogManager.GetCurrentClassLogger();
         private readonly string _appName = "Audiobookshelf";
         private readonly string _trayAppName = "AudiobookshelfTray";
@@ -32,12 +36,17 @@ namespace AudiobookshelfTray
         private string _installerPath;
         private ServerMonitor _localServerMonitor = null;
 
+        private readonly Icon _healthyIcon;
+        private readonly Icon _unhealthyIcon;
         private readonly NotifyIcon _trayIcon;
         private readonly ToolStripMenuItem _stopServerMenuItem;
         private readonly ToolStripMenuItem _startServerMenuItem;
         private readonly ToolStripMenuItem _restartServerMenuItem;
         private readonly ToolStripMenuItem _openServerMenuItem;
         private readonly ToolStripMenuItem _serverLogsMenuItem;
+        private readonly ToolStripMenuItem _openDataFolderMenuItem;
+        private readonly ToolStripMenuItem _openLogsFolderMenuItem;
+        private readonly ToolStripMenuItem _backupNowMenuItem;
         private readonly ToolStripMenuItem _aboutMenuItem;
         private readonly ToolStripMenuItem _startAtLoginCheckboxMenuItem;
         private readonly ToolStripMenuItem _autoCheckForUpdatesCheckboxMenuItem;
@@ -45,10 +54,15 @@ namespace AudiobookshelfTray
         private readonly ToolStripMenuItem _checkForUpdatesMenuItem;
 
         private DismissableMessageBox _newVersionAvailableDialog = null;
+        private bool _isServerHealthy = false;
+        private bool _hasOpenedBrowserOnStartup = false;
 
         public AppTray()
         {
             var settings = SettingsHandler.Load();
+
+            _healthyIcon = CreateBadgedIcon(Resources.AppIcon, Color.FromArgb(46, 204, 113)); // Bright Emerald Green
+            _unhealthyIcon = CreateBadgedIcon(Resources.AppIcon, Color.FromArgb(231, 76, 60)); // Crimson Red
 
             _stopServerMenuItem = new ToolStripMenuItem("Stop Service", null, StopServiceClicked) { Enabled = false };
             _startServerMenuItem = new ToolStripMenuItem("Start Service", null, StartServiceClicked) { Enabled = false };
@@ -56,6 +70,9 @@ namespace AudiobookshelfTray
             _serverLogsMenuItem = new ToolStripMenuItem("Server Logs", null, ShowServerLogsClicked) { Enabled = true };
             _openServerMenuItem = new ToolStripMenuItem("Open Audiobookshelf...", null, OpenClicked) { Enabled = true };
             _openServerMenuItem.Font = new Font(_openServerMenuItem.Font.Name, _openServerMenuItem.Font.Size, FontStyle.Bold);
+            _openDataFolderMenuItem = new ToolStripMenuItem("Open Data Folder", null, OpenDataFolderClicked);
+            _openLogsFolderMenuItem = new ToolStripMenuItem("Open Logs Folder", null, OpenLogsFolderClicked);
+            _backupNowMenuItem = new ToolStripMenuItem("Backup Database Now", null, BackupNowClicked);
             _aboutMenuItem = new ToolStripMenuItem("About Audiobookshelf", null, AboutClicked);
 
             _startAtLoginCheckboxMenuItem = new ToolStripMenuItem("Start Audiobookshelf Tray at Login") { CheckOnClick = true };
@@ -74,7 +91,7 @@ namespace AudiobookshelfTray
 
             _trayIcon = new NotifyIcon()
             {
-                Icon = Resources.AppIcon,
+                Icon = _unhealthyIcon ?? Resources.AppIcon,
                 ContextMenuStrip = new ContextMenuStrip()
                 {
                     Items = {
@@ -87,6 +104,10 @@ namespace AudiobookshelfTray
                         _stopServerMenuItem,
                         _restartServerMenuItem,
                         _serverLogsMenuItem,
+                        new ToolStripSeparator(),
+                        _openDataFolderMenuItem,
+                        _openLogsFolderMenuItem,
+                        _backupNowMenuItem,
                         new ToolStripSeparator(),
                         _aboutMenuItem,
                         _checkForUpdatesMenuItem,
@@ -111,6 +132,64 @@ namespace AudiobookshelfTray
             Init();
         }
 
+        private static Icon CreateBadgedIcon(Icon baseIcon, Color dotColor)
+        {
+            if (baseIcon == null) return null;
+
+            try
+            {
+                int width = baseIcon.Width > 0 ? baseIcon.Width : 32;
+                int height = baseIcon.Height > 0 ? baseIcon.Height : 32;
+
+                using (Bitmap bmp = new Bitmap(width, height, System.Drawing.Imaging.PixelFormat.Format32bppArgb))
+                {
+                    using (Graphics g = Graphics.FromImage(bmp))
+                    {
+                        g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
+                        g.InterpolationMode = System.Drawing.Drawing2D.InterpolationMode.HighQualityBicubic;
+                        g.PixelOffsetMode = System.Drawing.Drawing2D.PixelOffsetMode.HighQuality;
+
+                        // Draw base icon
+                        g.DrawIcon(baseIcon, new Rectangle(0, 0, width, height));
+
+                        // Dot size and position in bottom-right corner
+                        int dotSize = Math.Max(5, (int)(width * 0.36f));
+                        int dotX = width - dotSize - 1;
+                        int dotY = height - dotSize - 1;
+
+                        // Dark outline for contrast across dark/light taskbars
+                        using (Brush outlineBrush = new SolidBrush(Color.FromArgb(230, 20, 20, 20)))
+                        {
+                            g.FillEllipse(outlineBrush, dotX - 1, dotY - 1, dotSize + 2, dotSize + 2);
+                        }
+
+                        // Colored status dot
+                        using (Brush dotBrush = new SolidBrush(dotColor))
+                        {
+                            g.FillEllipse(dotBrush, dotX, dotY, dotSize, dotSize);
+                        }
+                    }
+
+                    IntPtr hIcon = bmp.GetHicon();
+                    try
+                    {
+                        using (Icon tempIcon = Icon.FromHandle(hIcon))
+                        {
+                            return (Icon)tempIcon.Clone();
+                        }
+                    }
+                    finally
+                    {
+                        DestroyIcon(hIcon);
+                    }
+                }
+            }
+            catch
+            {
+                return baseIcon;
+            }
+        }
+
         private void Init()
         {
             _trayIcon.DoubleClick += OpenClicked;
@@ -129,12 +208,12 @@ namespace AudiobookshelfTray
                 }
             }
 
-            // Timer for checking service / server status
-            _statusTimer.Interval = 2000;
-            _statusTimer.Tick += (s, e) => UpdateServiceStatusUI();
+            // Timer for checking service / server status & health
+            _statusTimer.Interval = 2500;
+            _statusTimer.Tick += (s, e) => CheckHealthAndUpdateUI();
             _statusTimer.Start();
 
-            UpdateServiceStatusUI();
+            CheckHealthAndUpdateUI();
 
             if (_autoCheckForUpdatesCheckboxMenuItem.Checked)
             {
@@ -155,6 +234,41 @@ namespace AudiobookshelfTray
             }
         }
 
+        private void SetTrayText(string text)
+        {
+            if (string.IsNullOrEmpty(text)) text = _trayAppName;
+            _trayIcon.Text = text.Length > 63 ? text.Substring(0, 63) : text;
+        }
+
+        private async void CheckHealthAndUpdateUI()
+        {
+            if (_isOperatingService) return;
+
+            var settings = SettingsHandler.Load();
+            string port = string.IsNullOrWhiteSpace(settings.ServerPort) ? "13378" : settings.ServerPort;
+
+            bool isInstalled = ServiceControllerHelper.IsServiceInstalled();
+            bool isProcessOrServiceRunning = isInstalled
+                ? (ServiceControllerHelper.GetServiceStatus() == ServiceControllerStatus.Running)
+                : IsLocalServerProcessRunning();
+
+            if (isProcessOrServiceRunning)
+            {
+                _isServerHealthy = await ServerHealthHelper.CheckServerHealthAsync(port);
+                if (_isServerHealthy && settings.OpenBrowserOnStartup && !_hasOpenedBrowserOnStartup)
+                {
+                    _hasOpenedBrowserOnStartup = true;
+                    OpenBrowser();
+                }
+            }
+            else
+            {
+                _isServerHealthy = false;
+            }
+
+            UpdateServiceStatusUI();
+        }
+
         private void UpdateServiceStatusUI()
         {
             if (MainForm != null && MainForm.InvokeRequired)
@@ -166,6 +280,8 @@ namespace AudiobookshelfTray
                 catch { }
                 return;
             }
+
+            _trayIcon.Icon = _isServerHealthy ? _healthyIcon : _unhealthyIcon;
 
             if (_isOperatingService)
             {
@@ -193,28 +309,29 @@ namespace AudiobookshelfTray
                     _startServerMenuItem.Enabled = false;
                     _stopServerMenuItem.Enabled = true;
                     _restartServerMenuItem.Enabled = true;
-                    _trayIcon.Text = "Audiobookshelf - Service Running";
+                    string healthTag = _isServerHealthy ? "Ready" : "Initializing...";
+                    SetTrayText($"Audiobookshelf - Service Running ({healthTag})");
                 }
                 else if (status == ServiceControllerStatus.Stopped)
                 {
                     _startServerMenuItem.Enabled = true;
                     _stopServerMenuItem.Enabled = false;
                     _restartServerMenuItem.Enabled = false;
-                    _trayIcon.Text = "Audiobookshelf - Service Stopped";
+                    SetTrayText("Audiobookshelf - Service Stopped");
                 }
                 else if (status == ServiceControllerStatus.StartPending)
                 {
                     _startServerMenuItem.Enabled = false;
                     _stopServerMenuItem.Enabled = false;
                     _restartServerMenuItem.Enabled = false;
-                    _trayIcon.Text = "Audiobookshelf - Starting Service...";
+                    SetTrayText("Audiobookshelf - Starting Service...");
                 }
                 else if (status == ServiceControllerStatus.StopPending)
                 {
                     _startServerMenuItem.Enabled = false;
                     _stopServerMenuItem.Enabled = false;
                     _restartServerMenuItem.Enabled = false;
-                    _trayIcon.Text = "Audiobookshelf - Stopping Service...";
+                    SetTrayText("Audiobookshelf - Stopping Service...");
                 }
                 else
                 {
@@ -222,7 +339,7 @@ namespace AudiobookshelfTray
                     _stopServerMenuItem.Enabled = false;
                     _restartServerMenuItem.Enabled = false;
                     string statusText = status.HasValue ? status.ToString() : "Unknown";
-                    _trayIcon.Text = $"Audiobookshelf - {statusText}";
+                    SetTrayText($"Audiobookshelf - {statusText}");
                 }
             }
             else
@@ -238,14 +355,15 @@ namespace AudiobookshelfTray
                     _startServerMenuItem.Enabled = false;
                     _stopServerMenuItem.Enabled = true;
                     _restartServerMenuItem.Enabled = true;
-                    _trayIcon.Text = "Audiobookshelf - Server Running";
+                    string healthTag = _isServerHealthy ? "Ready" : "Initializing...";
+                    SetTrayText($"Audiobookshelf - Server Running ({healthTag})");
                 }
                 else
                 {
                     _startServerMenuItem.Enabled = true;
                     _stopServerMenuItem.Enabled = false;
                     _restartServerMenuItem.Enabled = false;
-                    _trayIcon.Text = "Audiobookshelf - Server Stopped";
+                    SetTrayText("Audiobookshelf - Server Stopped");
                 }
             }
         }
@@ -314,6 +432,45 @@ namespace AudiobookshelfTray
         {
             SettingsDialog settingsDialog = new(this);
             settingsDialog.ShowDialog();
+        }
+
+        private void OpenDataFolderClicked(object sender, EventArgs e)
+        {
+            try
+            {
+                var settings = SettingsHandler.Load();
+                string dataDir = string.IsNullOrWhiteSpace(settings.DataDir) ? Audiobookshelf.Common.Settings.GetDefaultDataDir() : settings.DataDir;
+                if (!Directory.Exists(dataDir)) Directory.CreateDirectory(dataDir);
+                Process.Start("explorer.exe", dataDir);
+            }
+            catch (Exception ex)
+            {
+                _logger.Error($"Failed to open data folder: {ex.Message}");
+            }
+        }
+
+        private void OpenLogsFolderClicked(object sender, EventArgs e)
+        {
+            try
+            {
+                var settings = SettingsHandler.Load();
+                string dataDir = string.IsNullOrWhiteSpace(settings.DataDir) ? Audiobookshelf.Common.Settings.GetDefaultDataDir() : settings.DataDir;
+                string logsDir = Path.Combine(dataDir, "logs");
+                if (!Directory.Exists(logsDir)) Directory.CreateDirectory(logsDir);
+                Process.Start("explorer.exe", logsDir);
+            }
+            catch (Exception ex)
+            {
+                _logger.Error($"Failed to open logs folder: {ex.Message}");
+            }
+        }
+
+        private async void BackupNowClicked(object sender, EventArgs e)
+        {
+            var settings = SettingsHandler.Load();
+            _trayIcon.ShowBalloonTip(2000, "Audiobookshelf", "Creating database backup...", ToolTipIcon.Info);
+            var (success, message) = await ServerHealthHelper.TriggerBackupAsync(settings.ServerPort, settings.AdminApiKey);
+            _trayIcon.ShowBalloonTip(5000, "Audiobookshelf Backup", message, success ? ToolTipIcon.Info : ToolTipIcon.Warning);
         }
 
         private void AboutClicked(object sender, EventArgs e)
@@ -393,6 +550,8 @@ namespace AudiobookshelfTray
         {
             if (_isOperatingService) return;
             _isOperatingService = true;
+            _isServerHealthy = false;
+            _trayIcon.Icon = _unhealthyIcon;
 
             bool isInstalled = ServiceControllerHelper.IsServiceInstalled();
             _startServerMenuItem.Enabled = false;
@@ -461,6 +620,8 @@ namespace AudiobookshelfTray
         {
             if (_isOperatingService) return;
             _isOperatingService = true;
+            _isServerHealthy = false;
+            _trayIcon.Icon = _unhealthyIcon;
 
             bool isInstalled = ServiceControllerHelper.IsServiceInstalled();
             _startServerMenuItem.Enabled = false;
@@ -656,6 +817,9 @@ namespace AudiobookshelfTray
             _logger.Debug("Tray application exiting...");
             _statusTimer.Stop();
 
+            _healthyIcon?.Dispose();
+            _unhealthyIcon?.Dispose();
+
             // Stop standalone server process if running under tray
             try
             {
@@ -716,7 +880,7 @@ namespace AudiobookshelfTray
                     _newVersionAvailableDialog.Dismiss();
                 }
 
-                if (latestRelease.TagName != currentVersion)
+                if (SettingsHandler.IsNewerVersion(latestRelease.TagName, currentVersion))
                 {
                     ReleaseAsset exeAsset = latestRelease.Assets.FirstOrDefault(asset => asset.Name.EndsWith(".exe"));
                     if (exeAsset == null)
