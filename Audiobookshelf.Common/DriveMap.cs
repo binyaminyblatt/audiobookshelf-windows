@@ -55,8 +55,39 @@ namespace Audiobookshelf.Common
         [JsonProperty]
         public string Username { get; set; } = string.Empty;
 
-        [JsonProperty]
+        /// <summary>
+        /// Plain-text password, in memory only. It is written to config.json encrypted
+        /// as "PasswordProtected" (see SecretProtector).
+        /// </summary>
         public string Password { get; set; } = string.Empty;
+
+        /// <summary>
+        /// True if this entry was loaded from a config.json that still held a plain-text password.
+        /// Saving the settings rewrites it encrypted.
+        /// </summary>
+        public bool NeedsSecretMigration { get; private set; }
+
+        [JsonProperty("PasswordProtected")]
+        private string PasswordProtected
+        {
+            get => SecretProtector.Protect(Password);
+            set => Password = SecretProtector.Unprotect(value);
+        }
+
+        // Reads a plain-text "Password" from older config.json files. Never written back.
+        [JsonProperty("Password", NullValueHandling = NullValueHandling.Ignore)]
+        private string LegacyPassword
+        {
+            get => null;
+            set
+            {
+                if (!string.IsNullOrEmpty(value))
+                {
+                    Password = value;
+                    NeedsSecretMigration = true;
+                }
+            }
+        }
 
         public DriveMap()
         {

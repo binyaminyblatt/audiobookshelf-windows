@@ -5,7 +5,7 @@ Installs and manages the [audiobookshelf](https://github.com/advplyr/audiobooksh
 ## Key Features
 
 - **Runs as a 24/7 Windows Background Service**: Starts automatically on system boot (before user login) with non-elevated service control permissions for the configured user.
-- **Network Drive Mapping**: Automatically mounts UNC shares (e.g. `\\NAS\audiobooks` to `Z:`) before server startup with configurable retry attempts and delays, and automatically hides mapped drives in "This PC".
+- **Network Drive Mapping**: Automatically mounts UNC shares (e.g. `\\NAS\audiobooks` to `Z:`) before server startup with configurable retry attempts and delays, DPAPI-encrypted credential storage, and automatically hides mapped drives in "This PC".
 - **Host Binding & Network Interfaces**: Bind to `0.0.0.0` (all network adapters / LAN access), `127.0.0.1` (localhost only), or select any specific active local network adapter IPv4 address on multi-IP machines.
 - **Automated Windows Firewall Management**: Automatically configures and updates Windows Defender Firewall inbound rules on the server port, and safely deletes them upon uninstallation.
 - **HTTP Health Checking & Live Status Badge**: Proactively polls the server (`/ping`) every 2.5s and updates the taskbar tray icon with a **green dot** when healthy and receiving ping responses, and a **red dot** if the server is stopped or pings are failing (along with tooltip status `Ready` vs `Initializing...`).
@@ -14,10 +14,15 @@ Installs and manages the [audiobookshelf](https://github.com/advplyr/audiobooksh
   - Open Logs Folder (`C:\ProgramData\Audiobookshelf\logs`)
   - Backup Database Now (on-demand database snapshot via ABS API)
 - **Data Safety & Integrity**:
+  - **DPAPI Secret Encryption at Rest**: Encrypts sensitive secrets (network drive credentials and Admin API key) using Windows Data Protection API (DPAPI) with `LocalMachine` scope. Allows both the background Windows Service and the tray application to securely access shared configuration while eliminating plain-text passwords in `config.json`. Automatically migrates legacy plain-text secrets on startup.
   - Graceful process termination sending EOF signals, `CTRL_BREAK_EVENT`, and `CloseMainWindow` with a 5-second graceful window to allow SQLite WAL checkpoints to flush cleanly to disk before shutdown.
   - Automated pre-update database backups before applying software updates.
   - Log rotation with 10MB file caps and 5 rolling archives to prevent disk exhaustion.
-- **Watchdog & Auto-Recovery**: Automatically monitors and restarts the server process if it exits unexpectedly.
+- **Watchdog & Crash-Loop Protection**:
+  - Automatically monitors and restarts the server process if it exits unexpectedly.
+  - Features exponential backoff delays (2s up to 300s) to avoid restart storms.
+  - Integrated crash-loop circuit breaker: stops automatic restarts after consecutive crashes without a stable run (configurable, default: 5 attempts) to prevent infinite restart loops on fatal misconfigurations.
+  - Automatic failure counter reset once the server runs stably for 120 seconds.
 - **Interactive System Tray**:
   - Start, stop, and restart the Windows Service / standalone server process.
   - Open the Audiobookshelf web interface in your default browser.
@@ -65,12 +70,22 @@ AudiobookshelfInstaller.exe /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /PORT=13378
 Configuration is saved in `C:\ProgramData\Audiobookshelf\config.json`. You can manage settings via the Tray App:
 - Right-click the Audiobookshelf tray icon -> **Settings**.
 - **Server Settings**: Change HTTP Port, Host Binding, Data Directory, and toggle Firewall Management / Auto-Open Browser on startup.
-- **Network Drives**: Add, edit, or remove mapped drive letters (`Z:`, `Y:`, etc.) pointing to UNC network shares (`\\192.168.1.50\audiobooks`), with optional user credentials and auto-remount retry options.
+- **Network Drives**: Add, edit, or remove mapped drive letters (`Z:`, `Y:`, etc.) pointing to UNC network shares (`\\192.168.1.50\audiobooks`), with DPAPI-encrypted user credentials and auto-remount retry options.
 - **Custom Environment Variables**: Additional environment variables can be placed in `config.json` under the `"envs"` dictionary.
+
+### Key `config.json` Properties:
+| Property | Default | Description |
+|---|---|---|
+| `AdminApiKeyProtected` | *(empty)* | ABS Admin API key, encrypted via Windows DPAPI (`dpapi:<base64>`) |
+| `DriveMaps[].PasswordProtected` | *(empty)* | Network share password, encrypted via Windows DPAPI |
+| `AutoRestartOnCrash` | `true` | Watchdog auto-restart upon unexpected process termination |
+| `MaxConsecutiveRestarts` | `5` | Maximum consecutive crashes before circuit breaker stops restarting (`0` = unlimited) |
+| `StartServerOnMountFail` | `true` | Proceed with server startup even if a network drive fails to mount |
+| `AutoUpdateFromGitHub` | `false` | Scheduled midnight update checks and installations |
 
 ## Architecture
 
-- **`Audiobookshelf.Common`**: Shared library containing `DriveMap` (Win32 `mpr.dll` `WNetAddConnection2`), `CryptographicVerifier` (RSA-SHA256 provenance and checksum verification), `UpdateManager` (self-updater & automated rollback), `FirewallHelper` (`netsh` rule manager), `ServerHealthHelper` (`/ping` and `/api/backup`), `ProcessUtils` (graceful SQLite WAL process shutdown), and `ServiceControllerHelper`.
+- **`Audiobookshelf.Common`**: Shared library containing `SecretProtector` (Windows DPAPI machine-scope encryption & legacy plaintext secret migration), `DriveMap` (Win32 `mpr.dll` `WNetAddConnection2`), `CryptographicVerifier` (RSA-SHA256 provenance and checksum verification), `UpdateManager` (self-updater & automated rollback), `FirewallHelper` (`netsh` rule manager), `ServerHealthHelper` (`/ping` and `/api/backup`), `ProcessUtils` (graceful SQLite WAL process shutdown), and `ServiceControllerHelper`.
 - **`AudiobookshelfService.exe`**: The Windows Service that mounts network drives, supervises `audiobookshelf.exe` in Session 0, and handles scheduled midnight updates and pre-update backups.
 - **`AudiobookshelfTray.exe`**: WinForms system tray application running in the user session with quick access shortcuts, live logs viewer, health polling, and configuration UI.
 

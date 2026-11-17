@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using Newtonsoft.Json;
 
 namespace Audiobookshelf.Common
@@ -35,6 +36,14 @@ namespace Audiobookshelf.Common
         [JsonProperty]
         public bool StartServerOnMountFail { get; set; } = true;
 
+        // Restart the server automatically if it exits unexpectedly (with exponential backoff)
+        [JsonProperty]
+        public bool AutoRestartOnCrash { get; set; } = true;
+
+        // Give up after this many crashes in a row without a stable run (0 = never give up)
+        [JsonProperty]
+        public int MaxConsecutiveRestarts { get; set; } = 5;
+
         // GitHub automated updater at midnight (MUST be OFF by default)
         [JsonProperty]
         public bool AutoUpdateFromGitHub { get; set; } = false;
@@ -57,9 +66,41 @@ namespace Audiobookshelf.Common
         [JsonProperty]
         public string GitHubRepoName { get; set; } = "audiobookshelf-windows";
 
-        // Admin API Key required for self updates and backups
-        [JsonProperty]
+        // Admin API Key required for self updates and backups.
+        // Plain text in memory only; it is written to config.json encrypted as "AdminApiKeyProtected".
         public string AdminApiKey { get; set; } = string.Empty;
+
+        private bool _legacyAdminApiKeySeen;
+
+        [JsonProperty("AdminApiKeyProtected")]
+        private string AdminApiKeyProtected
+        {
+            get => SecretProtector.Protect(AdminApiKey);
+            set => AdminApiKey = SecretProtector.Unprotect(value);
+        }
+
+        // Reads a plain-text "AdminApiKey" from older config.json files. Never written back.
+        [JsonProperty("AdminApiKey", NullValueHandling = NullValueHandling.Ignore)]
+        private string LegacyAdminApiKey
+        {
+            get => null;
+            set
+            {
+                if (!string.IsNullOrEmpty(value))
+                {
+                    AdminApiKey = value;
+                    _legacyAdminApiKeySeen = true;
+                }
+            }
+        }
+
+        /// <summary>
+        /// True if this config was loaded from a file that still held plain-text secrets.
+        /// Saving the settings rewrites them encrypted.
+        /// </summary>
+        public bool HasLegacyPlaintextSecrets =>
+            _legacyAdminApiKeySeen ||
+            (DriveMaps != null && DriveMaps.Any(d => d != null && d.NeedsSecretMigration));
 
         [JsonProperty]
         public bool StartAtLogin { get; set; } = true;

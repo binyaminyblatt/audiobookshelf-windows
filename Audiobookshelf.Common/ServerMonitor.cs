@@ -20,6 +20,12 @@ namespace Audiobookshelf.Common
         private CancellationTokenSource _watchdogCts;
         private UpdateManager _updateManager;
 
+        // Crash-loop protection for the watchdog
+        private int _consecutiveFailures = 0;
+        private DateTime _lastStartUtc = DateTime.MinValue;
+        private const int StableRunSeconds = 120;   // a run this long resets the failure counter
+        private const int MaxBackoffSeconds = 300;  // longest wait between restart attempts
+
         static ServerMonitor()
         {
             EnsureNLogConfiguration();
@@ -101,6 +107,7 @@ namespace Audiobookshelf.Common
 
                 _isStopping = false;
                 _isUpdating = false;
+                _consecutiveFailures = 0; // a manual (re)start clears any crash-loop state
                 _watchdogCts?.Cancel();
                 _watchdogCts = new CancellationTokenSource();
 
@@ -158,6 +165,7 @@ namespace Audiobookshelf.Common
             {
                 _isUpdating = false;
                 _isStopping = false;
+                _consecutiveFailures = 0;
                 var settings = SettingsHandler.Load();
                 StartServerProcess(settings);
             }
@@ -170,6 +178,13 @@ namespace Audiobookshelf.Common
                 _logger.Info("Starting Audiobookshelf server supervision sequence...");
 
                 var settings = SettingsHandler.Load();
+
+                // One-time migration: re-save so plain-text secrets from older config.json files are written encrypted
+                if (settings.HasLegacyPlaintextSecrets)
+                {
+                    _logger.Info("Migrating plain-text secrets in config.json to encrypted storage...");
+                    SettingsHandler.Save(settings);
+                }
 
                 // 1. Handle Drive Mappings if configured
                 bool allDrivesMapped = true;
@@ -336,11 +351,18 @@ namespace Audiobookshelf.Common
                 _serverProcess.Exited += OnProcessExited;
 
                 _serverProcess.Start();
+                _lastStartUtc = DateTime.UtcNow;
                 _serverProcess.BeginOutputReadLine();
                 _serverProcess.BeginErrorReadLine();
 
                 _logger.Info($"Audiobookshelf server process started successfully (PID: {_serverProcess.Id}).");
             }
+        }
+
+        private static int GetBackoffSeconds(int failures)
+        {
+            // 5, 10, 20, 40, 80, 160, then capped at MaxBackoffSeconds
+            return Math.Min(MaxBackoffSeconds, 5 * (1 << Math.Min(failures - 1, 6)));
         }
 
         private void OnProcessExited(object sender, EventArgs e)
@@ -357,26 +379,56 @@ namespace Audiobookshelf.Common
 
             _logger.Warn($"Audiobookshelf server process exited with code {exitCode}.");
 
+            Settings settings = SettingsHandler.Load();
+            int delaySeconds;
+
             lock (_lock)
             {
                 _serverProcess = null;
 
-                if (!_isStopping && !_isUpdating)
+                if (_isStopping || _isUpdating) return;
+
+                if (!settings.AutoRestartOnCrash)
                 {
-                    _logger.Info("Watchdog: Server process stopped unexpectedly. Restarting in 5 seconds...");
-                    Task.Delay(5000).ContinueWith(_ =>
-                    {
-                        lock (_lock)
-                        {
-                            if (!_isStopping && !_isUpdating)
-                            {
-                                var settings = SettingsHandler.Load();
-                                StartServerProcess(settings);
-                            }
-                        }
-                    });
+                    _logger.Warn("Server exited unexpectedly and AutoRestartOnCrash is disabled. Not restarting.");
+                    return;
                 }
+
+                // A run that lasted long enough counts as healthy, so the backoff starts over
+                if ((DateTime.UtcNow - _lastStartUtc).TotalSeconds >= StableRunSeconds)
+                {
+                    _consecutiveFailures = 0;
+                }
+
+                _consecutiveFailures++;
+
+                int max = settings.MaxConsecutiveRestarts;
+                if (max > 0 && _consecutiveFailures > max)
+                {
+                    _logger.Error($"Server crashed {_consecutiveFailures} times in a row without a stable run (last exit code {exitCode}). Giving up on automatic restarts. Check server.log, fix the cause, then restart the service.");
+                    return;
+                }
+
+                delaySeconds = GetBackoffSeconds(_consecutiveFailures);
+                _logger.Warn($"Watchdog: server stopped unexpectedly (attempt {_consecutiveFailures}{(max > 0 ? "/" + max : "")}). Restarting in {delaySeconds}s...");
             }
+
+            Task.Delay(TimeSpan.FromSeconds(delaySeconds)).ContinueWith(_ =>
+            {
+                lock (_lock)
+                {
+                    if (_isStopping || _isUpdating || _serverProcess != null) return;
+
+                    try
+                    {
+                        StartServerProcess(SettingsHandler.Load());
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.Error($"Watchdog: failed to restart server: {ex}");
+                    }
+                }
+            });
         }
 
         public void Stop()
